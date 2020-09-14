@@ -1,0 +1,10 @@
+.ipynb_checkpoints/
+.vscode/
+__pycache__/
+data/
+garbage/
+models/
+pred/
+*.ipynb
+tmp
+whole_img/
