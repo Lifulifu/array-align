@@ -67,6 +67,8 @@ class Gpr():
 
 def read_tif(path, rgb=False):
     ims = cv2.imreadmulti(path)[1]
+    if not ims:
+        return False
     if rgb:
         for i, im in enumerate(ims):
             ims[i] = cv2.cvtColor(im, cv2.COLOR_GRAY2RGB)
@@ -198,7 +200,7 @@ class ArrayAlignDataset(Dataset):
     def __len__(self):
         return len(self.ims)
 
-def to_trainxy(im_file, gal_file, gpr_file, window_expand=2, down_sample=1, augment=True):
+def to_trainxy(im_file, gal_file, gpr_file, window_expand=2, down_sample=4, augment=True):
     '''
     returns:
         xs:
@@ -210,6 +212,9 @@ def to_trainxy(im_file, gal_file, gpr_file, window_expand=2, down_sample=1, augm
             shape ( #blocks*2, 6 )
     '''
     ims = read_tif(im_file)
+    if not ims:
+        return None, None
+
     gal, gpr = Gal(gal_file), Gpr(gpr_file)
     xs, ys = [], []
 
@@ -220,6 +225,10 @@ def to_trainxy(im_file, gal_file, gpr_file, window_expand=2, down_sample=1, augm
             p1, p2 = get_window_coords(b, gal, expand_rate=window_expand)
             cropped = crop_window(im, p1, p2).astype('uint8')
             cropped = cv2.resize(cropped, (cropped.shape[1]//down_sample, cropped.shape[0]//down_sample))
+            cropped = im_equalize(cropped, method = 'clahe', clipLimit = 20, tileGridSize = (8, 8))
+            # cropped = im_equalize(cropped, method = 'simple')
+            kernel = np.ones((2,2), np.uint8)
+            cropped = cv2.morphologyEx(cropped, cv2.MORPH_OPEN, kernel)
             xs.append(cropped)
 
             y = np.array([
@@ -269,8 +278,11 @@ def load_batch(ims, gal_file, gpr_files, **kwargs):
     xs, ys = [], []
     for im, gpr_file in zip(ims, gpr_files):
         x, y = to_trainxy(im, gal_file, gpr_file, **kwargs)
-        xs.append(x)
-        ys.append(y)
+        if x is not None:
+            xs.append(x)
+            ys.append(y)
+        else:
+            return None, None
     xs, ys = np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
     xs = np.expand_dims(xs, axis=1)
     return torch.tensor(xs).float(), torch.tensor(ys).float()
