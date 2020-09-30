@@ -13,7 +13,7 @@ def train(data_dirs, gal_file, model=None, epochs=100, start_epoch=0, save_inter
 
     os.makedirs(model_dir, exist_ok=True)
     if model == None:
-        model = Resnet().cuda()
+        model = Resnet().to("cuda:1")
     trds, teds = get_datasets(data_dirs, test_size=.1)
     trdl = DataLoader(trds, batch_size=1, shuffle=True)
     tedl = DataLoader(teds, batch_size=1, shuffle=True)
@@ -28,24 +28,36 @@ def train(data_dirs, gal_file, model=None, epochs=100, start_epoch=0, save_inter
         for batch, (ims, gprs) in enumerate(trdl):
             xb, yb = load_batch(ims, gal_file, gprs, augment=True, down_sample=4)
             # draw_xy(xb, yb); exit()
-            xb, yb = xb.cuda(), yb.cuda()
-            ypredb = model(xb)
-            loss = loss_func(ypredb, yb)
+            if xb is None:
+                # print("img break")
+                continue
+            for i in range(3):
+                xb_ = xb[i*64:(i+1)*64]
+                yb_ = yb[i*64:(i+1)*64]
+                xb_, yb_ = xb_.to("cuda:1"), yb_.to("cuda:1")
+                ypredb = model(xb_)
+                loss = loss_func(ypredb, yb_)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-        print(f'tr loss: {loss.item()}')
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            print(f'tr loss: {loss.item()}')
 
         for batch, (ims, gprs) in enumerate(tedl):
             xb, yb = load_batch(ims, gal_file, gprs, augment=True, down_sample=4)
-            xb, yb = xb.cuda(), yb.cuda()
-            ypredb = model(xb)
-            loss = loss_func(ypredb, yb)
-        print(f'te loss: {loss.item()}')
+            if xb is None:
+                print("img break")
+                continue
+            for i in range(3):
+                xb_ = xb[i*64:(i+1)*64]
+                yb_ = yb[i*64:(i+1)*64]
+                xb_, yb_ = xb_.to("cuda:1"), yb_.to("cuda:1")
+                ypredb = model(xb_)
+                loss = loss_func(ypredb, yb_)
+            print(f'te loss: {loss.item()}')
 
-        if epoch % save_interval == 0:
-            sample_imgs(xb[:10], yb[:10], ypredb[:10],
+        if epoch % save_interval == 0 and xb is not None:
+            sample_imgs(xb_, yb_, ypredb,
                 output_dir=os.path.join(result_dir, f'e{epoch}b{batch}/'))
             torch.save(model, os.path.join(model_dir, f'{epoch}.pt'))
 
@@ -72,10 +84,10 @@ def test_draw():
         cv2.imwrite(f'test/gt_{i}.png', im)
 
 if '__main__' == __name__:
-    # m = torch.load('models/95.pt').cuda()
-    train(['data/20200820 KD focus (12)/'],
-          gal_file='data/20200820 KD focus (12)/kd.GAL',
-          epochs=200, start_epoch=0, save_interval=10,
-          model_dir='models/kd_focus_res18_aug/',
-          result_dir='pred/kd_focus_res18_aug/')
+    # m = torch.load('models/95.pt').to("cuda:1")
+    train(['data/bipolar/Bipolar/'],
+          gal_file='data/bipolar/2016Ecoli_chip.GAL',
+          epochs=500, start_epoch=0, save_interval=10,
+          model_dir='models/bipolar_res18_aug_eq_b64/',
+          result_dir='pred/bipolar_res18_aug_eq_b64/')
     # test_draw()
