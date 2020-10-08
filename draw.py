@@ -4,7 +4,7 @@ import pandas as pd
 
 from preprocess import *
 
-def grayarr2rgbimg(x):
+def x2rgbimg(x):
     x = x[0] # from (c, h, w) to (h, w, c)
     x = (x * 255).astype(np.float32)
     return cv2.cvtColor(x, cv2.COLOR_GRAY2RGB)
@@ -52,10 +52,19 @@ def draw_gt_blocks(im, gal, gpr, color=255):
         im = cv2.polylines(im, [pts], True, color=color, thickness=2)
     return im
 
+def draw_all_info(im_path, gal_path, gpr_path, eq=None, eq_kwargs=None):
+    gal, gpr = Gal(gal_path), Gpr(gpr_path)
+    ims = read_tif(im_path, rgb=True, eq=eq, eq_kwargs=eq_kwargs)
+    for i in range(len(ims)):
+        ims[i] = draw_gal_centers(ims[i], gal, color=(255,0,0))
+        ims[i] = draw_windows(ims[i], gal, color=(255,0,0))
+        ims[i] = draw_gt_blocks(ims[i], gal, gpr,  color=(0,255,0))
+    return ims
+
 def draw_xy(xb, yb):
     count = 0
     for x, y in zip(xb.detach().numpy(), yb.detach().numpy()):
-        im = grayarr2rgbimg(x)
+        im = x2rgbimg(x)
         im = draw_parallelogram(im, y.astype(int), color=(0,255,0))
         cv2.imwrite(f'garbage/{count}.png', im)
         count += 1

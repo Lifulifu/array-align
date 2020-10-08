@@ -65,12 +65,13 @@ class Gpr():
                 except:
                     pass
 
-def read_tif(path, rgb=False):
+def read_tif(path, rgb=False, eq=None, eq_kwargs=None):
     ims = cv2.imreadmulti(path)[1]
     if not ims:
         return False
     if rgb:
         for i, im in enumerate(ims):
+            if eq: ims[i] = im_equalize(ims[i], method=eq, **eq_kwargs)
             ims[i] = cv2.cvtColor(im, cv2.COLOR_GRAY2RGB)
     return ims
 
@@ -80,7 +81,7 @@ def im_equalize(im, method='simple', **clahe_kwargs):
     else: # simple equalization
         return cv2.equalizeHist(im)
 
-def get_window_coords(block, gal, expand_rate=1.):
+def get_window_coords(block, gal, expand_rate=2.):
     block_info = gal.header[f'Block{block}']
     cx, cy = block_info[Gal.CENTER_X], block_info[Gal.CENTER_Y]
     w = block_info[Gal.COL_MARGIN] * (block_info[Gal.N_COLS]-1) * expand_rate
@@ -248,10 +249,10 @@ def to_trainxy(im_file, gal_file, gpr_file, window_expand=2, down_sample=4, augm
                 ]) / down_sample
 
                 flipx, flipy = flip_augment(cropped, np.concatenate((y, fourth_pt)))
-                rand_i = np.random.randint(3)
-                flipx, flipy = [flipx[rand_i]], [flipy[rand_i]]
+                # rand_i = np.random.randint(3)
+                # flipx, flipy = [flipx[rand_i]], [flipy[rand_i]]
 
-                offsetx, offsety = offset_augment(cropped, y, n_samples=2)
+                offsetx, offsety = offset_augment(cropped, y, n_samples=4)
 
                 xs = xs + flipx + offsetx # list concat
                 ys = ys + flipy + offsety

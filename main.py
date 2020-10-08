@@ -2,21 +2,23 @@ import torch
 import torch.nn as nn
 import cv2
 import os
+from tqdm import tqdm
 
 from model import Resnet
 from preprocess import *
 from draw import *
+from util import get_mean_iou
 # import IPython; IPython.embed(); exit()
 
-def train(data_dirs, gal_file, model=None, epochs=100, start_epoch=0, save_interval=5,
-          model_dir='models/', result_dir='pred/'):
+def train(data_dirs, gal_file, model=None, epochs=100, start_epoch=0, minibatch=None,
+    save_interval=5, model_dir='models/', result_dir='pred/', device='cuda:0'):
 
     os.makedirs(model_dir, exist_ok=True)
     if model == None:
-        model = Resnet().to("cuda:1")
+        model = Resnet().to(device)
     trds, teds = get_datasets(data_dirs, test_size=.1)
-    trdl = DataLoader(trds, batch_size=1, shuffle=True)
-    tedl = DataLoader(teds, batch_size=1, shuffle=True)
+    trdl = DataLoader(trds, batch_size=2, shuffle=True)
+    tedl = DataLoader(teds, batch_size=2, shuffle=True)
     print('train:', len(trds), 'test', len(teds))
 
     loss_func = nn.MSELoss(reduction='mean')
@@ -25,40 +27,45 @@ def train(data_dirs, gal_file, model=None, epochs=100, start_epoch=0, save_inter
 
     for epoch in range(start_epoch, start_epoch+epochs):
         print(f'\nepoch {epoch}')
-        for batch, (ims, gprs) in enumerate(trdl):
+
+        trdl_bar = tqdm(trdl, ncols=100)
+        for ims, gprs in trdl_bar:
             xb, yb = load_batch(ims, gal_file, gprs, augment=True, down_sample=4)
             # draw_xy(xb, yb); exit()
             if xb is None:
-                # print("img break")
+                print("empty batch")
                 continue
-            for i in range(3):
-                xb_ = xb[i*64:(i+1)*64]
-                yb_ = yb[i*64:(i+1)*64]
-                xb_, yb_ = xb_.to("cuda:1"), yb_.to("cuda:1")
-                ypredb = model(xb_)
-                loss = loss_func(ypredb, yb_)
+            if minibatch:
+                idx = np.random.randint(low=0, high=len(xb), size=minibatch)
+                xb, yb = xb[idx], yb[idx]
+            xb, yb = xb.to(device), yb.to(device)
+            ypredb = model(xb)
+            loss = loss_func(ypredb, yb)
+            # iou = get_mean_iou(yb, ypredb)
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-            print(f'tr loss: {loss.item()}')
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            trdl_bar.set_description(f'tr loss: {loss.item():.3f}')
 
-        for batch, (ims, gprs) in enumerate(tedl):
-            xb, yb = load_batch(ims, gal_file, gprs, augment=True, down_sample=4)
-            if xb is None:
-                print("img break")
-                continue
-            for i in range(3):
-                xb_ = xb[i*64:(i+1)*64]
-                yb_ = yb[i*64:(i+1)*64]
-                xb_, yb_ = xb_.to("cuda:1"), yb_.to("cuda:1")
-                ypredb = model(xb_)
-                loss = loss_func(ypredb, yb_)
-            print(f'te loss: {loss.item()}')
+        tedl_bar = tqdm(tedl, ncols=100)
+        for ims, gprs in tedl_bar:
+            with torch.no_grad():
+                xb, yb = load_batch(ims, gal_file, gprs, augment=True, down_sample=4)
+                if xb is None:
+                    print("empty batch")
+                    continue
+                if minibatch:
+                    idx = np.random.randint(low=0, high=len(xb), size=minibatch)
+                    xb, yb = xb[idx], yb[idx]
+                xb, yb = xb.to(device), yb.to(device)
+                ypredb = model(xb)
+                loss = loss_func(ypredb, yb)
+                tedl_bar.set_description(f'te loss: {loss.item()}')
 
         if epoch % save_interval == 0 and xb is not None:
-            sample_imgs(xb_, yb_, ypredb,
-                output_dir=os.path.join(result_dir, f'e{epoch}b{batch}/'))
+            sample_imgs(xb, yb, ypredb,
+                output_dir=os.path.join(result_dir, f'e{epoch}/'))
             torch.save(model, os.path.join(model_dir, f'{epoch}.pt'))
 
 def sample_imgs(xb, yb, ypredb, output_dir, **kwargs):
@@ -85,9 +92,11 @@ def test_draw():
 
 if '__main__' == __name__:
     # m = torch.load('models/95.pt').to("cuda:1")
-    train(['data/bipolar/Bipolar/'],
-          gal_file='data/bipolar/2016Ecoli_chip.GAL',
-          epochs=500, start_epoch=0, save_interval=10,
-          model_dir='models/bipolar_res18_aug_eq_b64/',
-          result_dir='pred/bipolar_res18_aug_eq_b64/')
+    train(
+        ['data/kawasaki/fc/', 'data/kawasaki/kd1/',
+         'data/kawasaki/kd3/', 'data/kawasaki/nc/'],
+        gal_file='data/bipolar/2016Ecoli_chip.GAL',
+        epochs=500, start_epoch=0, save_interval=10, minibatch=64,
+        model_dir='models/kd.b64.aug/',
+        result_dir='pred/kd.b64.aug/')
     # test_draw()
