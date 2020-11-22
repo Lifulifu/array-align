@@ -10,6 +10,8 @@ import torch
 from torch.utils.data.dataset import Dataset
 from torch.utils.data import DataLoader
 
+from .util import write_file
+
 class Gal():
     # index info of gal.header['Blockn']
     CENTER_X = 0; CENTER_Y = 1; SIZE = 2
@@ -65,21 +67,43 @@ class Gpr():
                 except:
                     pass
 
-def read_tif(path, rgb=False, eq=None, eq_kwargs=None):
+class ArrayAlignDataset(Dataset):
+    '''
+    returns:
+        x: img paths
+        y: corresponding gpr paths
+    '''
+    def __init__(self, im_files, gpr_files, down_sample=2):
+        assert len(im_files) == len(gpr_files)
+        self.ims, self.gprs = im_files, gpr_files
+
+    def __getitem__(self, i):
+        return self.ims[i], self.gprs[i]
+
+    def __len__(self):
+        return len(self.ims)
+
+def read_tif(path, rgb=False, eq_method='clahe', clahe_kwargs={'clipLimit': 20, 'tileGridSize': (8, 8)}):
     ims = cv2.imreadmulti(path)[1]
     if not ims:
+        print(f'{path} failed to read.')
         return False
-    if rgb:
-        for i, im in enumerate(ims):
-            if eq: ims[i] = im_equalize(ims[i], method=eq, **eq_kwargs)
+    for i, im in enumerate(ims):
+        if eq_method:
+            ims[i] = im_equalize(ims[i], method=eq_method, clahe_kwargs=clahe_kwargs)
+        if rgb:
             ims[i] = cv2.cvtColor(im, cv2.COLOR_GRAY2RGB)
     return ims
 
-def im_equalize(im, method='simple', **clahe_kwargs):
+def im_equalize(im, method='clahe', clahe_kwargs={'clipLimit': 20, 'tileGridSize': (8, 8)}):
     if method == 'clahe':
         return cv2.createCLAHE(**clahe_kwargs).apply(im)
     else: # simple equalization
         return cv2.equalizeHist(im)
+
+def im_morphology(im):
+    kernel = np.ones((2,2), np.uint8)
+    return cv2.morphologyEx(im, cv2.MORPH_OPEN, kernel)
 
 def get_window_coords(block, gal, expand_rate=2.):
     block_info = gal.header[f'Block{block}']
@@ -185,80 +209,122 @@ def flip_augment(im, pts):
     ]))
     return augx, augy # list of arrays
 
-class ArrayAlignDataset(Dataset):
+def img2x(img_path, gal_file, window_expand=2, down_sample=4, equalize='clahe', morphology=True):
     '''
-    returns:
-        x: img paths
-        y: corresponding gpr paths
-    '''
-    def __init__(self, im_files, gpr_files, down_sample=2):
-        assert len(im_files) == len(gpr_files)
-        self.ims, self.gprs = im_files, gpr_files
+    Single img file to xs for all blocks and fused channels
 
-    def __getitem__(self, i):
-        return self.ims[i], self.gprs[i]
-
-    def __len__(self):
-        return len(self.ims)
-
-def to_trainxy(im_file, gal_file, gpr_file, window_expand=2, down_sample=4, augment=True):
-    '''
     returns:
         xs:
             cropped window, grayscale[0~255]=>[0~1]
-            shape ( #blocks*2, win_shape[0], win_shape[1] )
+            shape ( #blocks, 1, win_shape[0], win_shape[1] )
+        idx:
+            (img_path, block) for one x sample
+    '''
+    ims = read_tif(img_path)
+    if ims:
+        im = np.stack(ims).max(axis=0) # fuse img channels
+    else:
+        print(f'failed to read img {img_path}, skip.')
+        return None, None
+
+    gal = Gal(gal_file) if type(gal_file) == str else gal_file
+    xs, idxs = [], []
+    for b in range(1, gal.header['BlockCount']+1):
+        idxs.append((img_path, b))
+
+        p1, p2 = get_window_coords(b, gal, expand_rate=window_expand)
+        cropped = crop_window(im, p1, p2).astype('uint8')
+        cropped = cv2.resize(cropped, (cropped.shape[1]//down_sample, cropped.shape[0]//down_sample))
+        if equalize: cropped = im_equalize(cropped, method=equalize)
+        if morphology: cropped = im_morphology(cropped)
+        xs.append(cropped)
+
+    xs = np.stack(xs)
+    return np.expand_dims(xs, axis=1)/255, idxs
+
+def img2xy(im_file, gal_file, gpr_file, window_expand=2, down_sample=4,
+        augment=True, equalize='clahe', morphology=True):
+    '''
+    Single img file to xys for all blocks and channels
+
+    returns:
+        xs:
+            cropped window, grayscale[0~255]=>[0~1]
+            shape ( #blocks, 1, win_shape[0], win_shape[1] )
         ys:
             top left, bottom left, bottom right XYs of a block (L shape)
             (relative to window coords)
             shape ( #blocks*2, 6 )
+        idx:
+            (img_path, block) for one x sample
     '''
+
     ims = read_tif(im_file)
-    if not ims:
+    if ims:
+        im = np.stack(ims).max(axis=0)
+    else:
+        print(f'failed to read img {im_file}, skip.')
         return None, None
 
-    gal, gpr = Gal(gal_file), Gpr(gpr_file)
-    xs, ys = [], []
+    gal = Gal(gal_file) if type(gal_file) == str else gal_file
+    gpr = Gpr(gpr_file) if type(gpr_file) == str else gpr_file
+    xs, ys, idxs = [], [], []
 
-    for im in ims: # layers of img
-        for b in range(1, gal.header['BlockCount']+1):
-            n_rows = gal.header[f'Block{b}'][Gal.N_ROWS]
-            n_cols = gal.header[f'Block{b}'][Gal.N_COLS]
-            p1, p2 = get_window_coords(b, gal, expand_rate=window_expand)
-            cropped = crop_window(im, p1, p2).astype('uint8')
-            cropped = cv2.resize(cropped, (cropped.shape[1]//down_sample, cropped.shape[0]//down_sample))
-            cropped = im_equalize(cropped, method = 'clahe', clipLimit = 20, tileGridSize = (8, 8))
-            # cropped = im_equalize(cropped, method = 'simple')
-            kernel = np.ones((2,2), np.uint8)
-            cropped = cv2.morphologyEx(cropped, cv2.MORPH_OPEN, kernel)
-            xs.append(cropped)
+    for b in range(1, gal.header['BlockCount']+1):
 
-            y = np.array([
-                gpr.data.loc[b, 1, 1]['X']*.1 - p1[0],
-                gpr.data.loc[b, 1, 1]['Y']*.1 - p1[1],
-                gpr.data.loc[b, n_rows, 1]['X']*.1 - p1[0],
-                gpr.data.loc[b, n_rows, 1]['Y']*.1 - p1[1],
-                gpr.data.loc[b, n_rows, n_cols]['X']*.1 - p1[0],
-                gpr.data.loc[b, n_rows, n_cols]['Y']*.1 - p1[1]
+        idxs.append((im_file, b))
+        n_rows = gal.header[f'Block{b}'][Gal.N_ROWS]
+        n_cols = gal.header[f'Block{b}'][Gal.N_COLS]
+        p1, p2 = get_window_coords(b, gal, expand_rate=window_expand)
+        cropped = crop_window(im, p1, p2).astype('uint8')
+        cropped = cv2.resize(cropped, (cropped.shape[1]//down_sample, cropped.shape[0]//down_sample))
+        if equalize: cropped = im_equalize(cropped, method=equalize)
+        if morphology: cropped = im_morphology(cropped)
+        xs.append(cropped)
+
+        y = np.array([
+            gpr.data.loc[b, 1, 1]['X']*.1 - p1[0],
+            gpr.data.loc[b, 1, 1]['Y']*.1 - p1[1],
+            gpr.data.loc[b, n_rows, 1]['X']*.1 - p1[0],
+            gpr.data.loc[b, n_rows, 1]['Y']*.1 - p1[1],
+            gpr.data.loc[b, n_rows, n_cols]['X']*.1 - p1[0],
+            gpr.data.loc[b, n_rows, n_cols]['Y']*.1 - p1[1]
+        ]) / down_sample
+        ys.append(y)
+
+        if augment:
+            fourth_pt = np.array([
+                gpr.data.loc[b, 1, n_cols]['X']*.1 - p1[0],
+                gpr.data.loc[b, 1, n_cols]['Y']*.1 - p1[1],
             ]) / down_sample
+            flipx, flipy = flip_augment(cropped, np.concatenate((y, fourth_pt)))
+            offsetx, offsety = offset_augment(cropped, y, n_samples=4)
+            xs = xs + flipx + offsetx # list concat
+            ys = ys + flipy + offsety
+
+    xs = np.stack(xs)
+    return np.expand_dims(xs, axis=1)/255, np.stack(ys), idxs
+
+def imgs2xy(ims, gal_file, gpr_files, **kwargs):
+    '''
+    List of img files to xy for all blocks
+
+    args: lists of img and gpr paths
+    returns: aggregated x, y nparrays
+    '''
+    xs, ys = [], []
+    gal = Gal(gal_file)
+    for im, gpr_file in zip(ims, gpr_files):
+        x, y, _ = img2xy(im, gal, gpr_file, **kwargs)
+        if x is not None:
+            xs.append(x)
             ys.append(y)
+        else:
+            return None, None
+    xs, ys = np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
+    return xs, ys
 
-            if augment:
-                fourth_pt = np.array([
-                    gpr.data.loc[b, 1, n_cols]['X']*.1 - p1[0],
-                    gpr.data.loc[b, 1, n_cols]['Y']*.1 - p1[1],
-                ]) / down_sample
-
-                flipx, flipy = flip_augment(cropped, np.concatenate((y, fourth_pt)))
-                # rand_i = np.random.randint(3)
-                # flipx, flipy = [flipx[rand_i]], [flipy[rand_i]]
-
-                offsetx, offsety = offset_augment(cropped, y, n_samples=4)
-
-                xs = xs + flipx + offsetx # list concat
-                ys = ys + flipy + offsety
-    return np.stack(xs)/255, np.stack(ys)
-
-def get_datasets(dirs, test_size=.1):
+def get_datasets(dirs, va_size=.2, te_size=.2, save_dir=None):
     '''
     returns: (trainDataset, testDataset)
     '''
@@ -268,25 +334,16 @@ def get_datasets(dirs, test_size=.1):
             if f.endswith('.tif'):
                 ims.append(d + f)
                 gprs.append(d + f.replace('.tif', '.gpr'))
-    imtr, imte, gprtr, gprte = train_test_split(ims, gprs, test_size=test_size, shuffle=True)
-    return ArrayAlignDataset(imtr, gprtr), ArrayAlignDataset(imte, gprte)
+    va_size = va_size / (1 - te_size) # split va from tr, so the correct proportion of va is va_size / tr_size
+    imtr, imte, gprtr, gprte = train_test_split(ims, gprs, test_size=te_size, shuffle=True)
+    imtr, imva, gprtr, gprva = train_test_split(imtr, gprtr, test_size=va_size, shuffle=True)
+    if save_dir:
+        write_file(imtr, os.path.join(save_dir, 'tr.txt'))
+        write_file(imva, os.path.join(save_dir, 'va.txt'))
+        write_file(imte, os.path.join(save_dir, 'te.txt'))
+    return ArrayAlignDataset(imtr, gprtr), ArrayAlignDataset(imva, gprva), ArrayAlignDataset(imte, gprte)
 
-def load_batch(ims, gal_file, gpr_files, **kwargs):
-    '''
-    args: lists of img and gpr paths
-    returns: aggregated x, y nparrays
-    '''
-    xs, ys = [], []
-    for im, gpr_file in zip(ims, gpr_files):
-        x, y = to_trainxy(im, gal_file, gpr_file, **kwargs)
-        if x is not None:
-            xs.append(x)
-            ys.append(y)
-        else:
-            return None, None
-    xs, ys = np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
-    xs = np.expand_dims(xs, axis=1)
-    return torch.tensor(xs).float(), torch.tensor(ys).float()
+
 
 if '__main__' == __name__:
     pass

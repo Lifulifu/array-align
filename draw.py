@@ -1,8 +1,7 @@
 import cv2
 import numpy as np
-import pandas as pd
 
-from preprocess import *
+from .preprocess import *
 
 def x2rgbimg(x):
     x = x[0] # from (c, h, w) to (h, w, c)
@@ -68,3 +67,13 @@ def draw_xy(xb, yb):
         im = draw_parallelogram(im, y.astype(int), color=(0,255,0))
         cv2.imwrite(f'garbage/{count}.png', im)
         count += 1
+
+def draw_spots(im, spot_df, color=255):
+    for idx, row in spot_df.iterrows():
+        im = cv2.circle(im, (int(round(row['x'])), int(round(row['y']))),
+            5, color=color, thickness=2)
+    return im
+
+if __name__ == '__main__':
+    pass
+    # import IPython; IPython.embed(); exit()

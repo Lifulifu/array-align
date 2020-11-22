@@ -3,70 +3,80 @@ import torch.nn as nn
 import cv2
 import os
 from tqdm import tqdm
+import json
 
-from model import Resnet
-from preprocess import *
-from draw import *
-from util import get_mean_iou
-# import IPython; IPython.embed(); exit()
+from .model import Resnet
+from .preprocess import *
+from .draw import *
+from .util import *
 
-def train(data_dirs, gal_file, model=None, epochs=100, start_epoch=0, minibatch=None,
-    save_interval=5, model_dir='models/', result_dir='pred/', device='cuda:0'):
+def train(trdl, vadl, gal_file, down_sample=4, window_expand=2, eq=None,
+    morphology=None, model=None, epochs=100, start_epoch=0, minibatch=None,
+    save_interval=5, output_dir='outputs/', device='cuda:0'):
 
-    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, 'models'), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, 'preds'), exist_ok=True)
     if model == None:
         model = Resnet().to(device)
-    trds, teds = get_datasets(data_dirs, test_size=.1)
-    trdl = DataLoader(trds, batch_size=2, shuffle=True)
-    tedl = DataLoader(teds, batch_size=2, shuffle=True)
-    print('train:', len(trds), 'test', len(teds))
+    else:
+        model = model.to(device)
 
     loss_func = nn.MSELoss(reduction='mean')
     # optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    # log file header
+    write_file('epoch,tr_loss,va_loss',
+            os.path.join(output_dir, 'training_log.txt'), mode='w')
 
     for epoch in range(start_epoch, start_epoch+epochs):
         print(f'\nepoch {epoch}')
 
         trdl_bar = tqdm(trdl, ncols=100)
         for ims, gprs in trdl_bar:
-            xb, yb = load_batch(ims, gal_file, gprs, augment=True, down_sample=4)
+            xb, yb = imgs2xy(ims, gal_file, gprs, augment=True, equalize=eq,
+                down_sample=down_sample, window_expand=window_expand)
             # draw_xy(xb, yb); exit()
             if xb is None:
-                print("empty batch")
-                continue
+                print("empty batch"); continue
             if minibatch:
                 idx = np.random.randint(low=0, high=len(xb), size=minibatch)
                 xb, yb = xb[idx], yb[idx]
-            xb, yb = xb.to(device), yb.to(device)
+            xb, yb = torch.tensor(xb).float().to(device), torch.tensor(yb).float().to(device)
             ypredb = model(xb)
             loss = loss_func(ypredb, yb)
-            # iou = get_mean_iou(yb, ypredb)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            trdl_bar.set_description(f'tr loss: {loss.item():.3f}')
+            tr_loss = loss.item()
+            trdl_bar.set_description(f'tr loss: {tr_loss:.3f}')
 
-        tedl_bar = tqdm(tedl, ncols=100)
-        for ims, gprs in tedl_bar:
-            with torch.no_grad():
-                xb, yb = load_batch(ims, gal_file, gprs, augment=True, down_sample=4)
+        vadl_bar = tqdm(vadl, ncols=100)
+        with torch.no_grad():
+            for ims, gprs in vadl_bar:
+                xb, yb = imgs2xy(ims, gal_file, gprs, augment=True, equalize=eq,
+                    down_sample=down_sample, window_expand=window_expand, morphology=morphology)
                 if xb is None:
                     print("empty batch")
                     continue
                 if minibatch:
                     idx = np.random.randint(low=0, high=len(xb), size=minibatch)
                     xb, yb = xb[idx], yb[idx]
-                xb, yb = xb.to(device), yb.to(device)
+                xb, yb = torch.tensor(xb).float().to(device), torch.tensor(yb).float().to(device)
                 ypredb = model(xb)
                 loss = loss_func(ypredb, yb)
-                tedl_bar.set_description(f'te loss: {loss.item()}')
+                va_loss = loss.item()
+                vadl_bar.set_description(f'va loss: {va_loss:.3f}')
 
-        if epoch % save_interval == 0 and xb is not None:
-            sample_imgs(xb, yb, ypredb,
-                output_dir=os.path.join(result_dir, f'e{epoch}/'))
-            torch.save(model, os.path.join(model_dir, f'{epoch}.pt'))
+            if epoch % save_interval == 0 and xb is not None:
+                torch.save(model, os.path.join(output_dir, f'models/{epoch}.pt'))
+                sample_imgs(xb, yb, ypredb,
+                    output_dir=os.path.join(output_dir, f'preds/e{epoch}/'))
+
+        # epoch end
+        write_file(f'{epoch},{tr_loss},{va_loss}',
+            os.path.join(output_dir, 'training_log.txt'), mode='a')
 
 def sample_imgs(xb, yb, ypredb, output_dir, **kwargs):
     os.makedirs(output_dir, exist_ok=True)
@@ -89,14 +99,3 @@ def test_draw():
         im = draw_gal_centers(im, gal, color=(0,255,255))
         im = draw_windows(im, gal, expand_rate=2, color=(0,255,255))
         cv2.imwrite(f'test/gt_{i}.png', im)
-
-if '__main__' == __name__:
-    # m = torch.load('models/95.pt').to("cuda:1")
-    train(
-        ['data/kawasaki/fc/', 'data/kawasaki/kd1/',
-         'data/kawasaki/kd3/', 'data/kawasaki/nc/'],
-        gal_file='data/bipolar/2016Ecoli_chip.GAL',
-        epochs=500, start_epoch=0, save_interval=10, minibatch=64,
-        model_dir='models/kd.b64.aug/',
-        result_dir='pred/kd.b64.aug/')
-    # test_draw()
