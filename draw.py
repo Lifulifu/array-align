@@ -1,10 +1,11 @@
 import cv2
+import os
 import numpy as np
 
-from .preprocess import *
+from .util import *
 
 def x2rgbimg(x):
-    x = x[0] # from (c, h, w) to (h, w, c)
+    x = x[0] # from (1, h, w) to (h, w)
     x = (x * 255).astype(np.float32)
     return cv2.cvtColor(x, cv2.COLOR_GRAY2RGB)
 
@@ -60,19 +61,40 @@ def draw_all_info(im_path, gal_path, gpr_path, eq=None, eq_kwargs=None):
         ims[i] = draw_gt_blocks(ims[i], gal, gpr,  color=(0,255,0))
     return ims
 
-def draw_xy(xb, yb):
+def draw_xy_block_Lcoord(xb, yb):
     count = 0
-    for x, y in zip(xb.detach().numpy(), yb.detach().numpy()):
+    for x, y in zip(xb, yb):
         im = x2rgbimg(x)
         im = draw_parallelogram(im, y.astype(int), color=(0,255,0))
         cv2.imwrite(f'garbage/{count}.png', im)
         count += 1
 
-def draw_spots(im, spot_df, color=255):
-    for idx, row in spot_df.iterrows():
-        im = cv2.circle(im, (int(round(row['x'])), int(round(row['y']))),
+def draw_xy_spot_coord(xb, yb):
+    for i, (x, y) in enumerate(zip(xb, yb)):
+        im = x2rgbimg(x)
+        im[:, :, 0] = im[:, :, 0] + y*255
+        im = np.clip(im, 0, 255).astype(int)
+        cv2.imwrite(f'array_align/garbage/test/{i}.png', im)
+
+def draw_spots(im, spot_coords, color=255, coords=['x', 'y']):
+    for spot_coord in spot_coords:
+        im = cv2.circle(im, (int(round(spot_coord[0])), int(round(spot_coord[1]))),
             5, color=color, thickness=2)
     return im
+
+def draw_img_dir(img_dir, output_dir, gal_path, color=(255,0,0), read_tif_args={}, draw_windows_args={}):
+    os.makedirs(output_dir, exist_ok=True)
+    gal = Gal(gal_path)
+    for f in os.listdir(img_dir):
+        if not f.endswith('.tif'):
+            break
+        imgs = read_tif(os.path.join(img_dir, f), rgb=True, **read_tif_args)
+        for channel, img in enumerate(imgs):
+            img = draw_gal_centers(img, gal, color)
+            img = draw_windows(img, gal, color, **draw_windows_args)
+            output_path = os.path.join(output_dir, f.replace('.tif', f'_{channel}.png'))
+            cv2.imwrite(output_path, img)
+            print(output_path)
 
 if __name__ == '__main__':
     pass
