@@ -1,6 +1,7 @@
 import cv2
 import os
 import numpy as np
+from typing import List
 
 from .util import *
 
@@ -11,16 +12,15 @@ def x2rgbimg(x):
 
 def draw_parallelogram(im, pts, label=True, label_offset=5, color=255):
     '''
-    pts: 3 points: (x1, y1, x2, y2, x3, y3)
+    pts: 3 points: (3, 2)
     '''
-    pts = pts.reshape(3, 2)
     p4 = np.expand_dims(pts[0] + (pts[2] - pts[1]), axis=0) # the top right point
     pts = np.concatenate([pts, p4], axis=0)
-    im = cv2.polylines(im, [pts], True, color, 2)
+    im = cv2.polylines(im, [pts], True, color, 1)
     if label:
         for i in range(3):
             im = cv2.putText(im, str(i+1), tuple(pts[i] + label_offset),
-                             cv2.FONT_HERSHEY_SIMPLEX, 1, color, 1, cv2.LINE_AA)
+                             cv2.FONT_HERSHEY_SIMPLEX, .5, color, 1, cv2.LINE_AA)
     return im
 
 def draw_gal_centers(im, gal, color=255):
@@ -61,12 +61,14 @@ def draw_all_info(im_path, gal_path, gpr_path, eq=None, eq_kwargs=None):
         ims[i] = draw_gt_blocks(ims[i], gal, gpr,  color=(0,255,0))
     return ims
 
-def draw_xy_block_Lcoord(xb, yb):
+def write_xyb_block_corner_coord(xb, yb, path):
     count = 0
     for x, y in zip(xb, yb):
+        if len(y.shape) <= 1: # y is flattened
+            y = y.reshape((-1, 2))
         im = x2rgbimg(x)
-        im = draw_parallelogram(im, y.astype(int), color=(0,255,0))
-        cv2.imwrite(f'garbage/{count}.png', im)
+        im = cv2.polylines(im, [y.astype('int32')], True, color=(0,255,0), thickness=1)
+        cv2.imwrite(os.path.join(path, f'{count}.png'), im)
         count += 1
 
 def draw_xy_spot_coord(xb, yb):
@@ -74,9 +76,9 @@ def draw_xy_spot_coord(xb, yb):
         im = x2rgbimg(x)
         im[:, :, 0] = im[:, :, 0] + y*255
         im = np.clip(im, 0, 255).astype(int)
-        cv2.imwrite(f'array_align/garbage/test/{i}.png', im)
+        cv2.imwrite(f'array_align/pred/test/{i}.png', im)
 
-def draw_spots(im, spot_coords, color=255, coords=['x', 'y']):
+def draw_spots(im, spot_coords, color=255):
     for spot_coord in spot_coords:
         im = cv2.circle(im, (int(round(spot_coord[0])), int(round(spot_coord[1]))),
             5, color=color, thickness=2)
@@ -95,6 +97,17 @@ def draw_img_dir(img_dir, output_dir, gal_path, color=(255,0,0), read_tif_args={
             output_path = os.path.join(output_dir, f.replace('.tif', f'_{channel}.png'))
             cv2.imwrite(output_path, img)
             print(output_path)
+
+def draw_cohort_df_coords(cohort_df, coord_cols:List[list], colors:List[tuple]=[(255,0,0)],
+        img_root='./', save_dir='./', pixel_size=10, eq=False):
+    os.makedirs(save_dir, exist_ok=True)
+    for path, df in cohort_df.groupby(['path']):
+        ims = read_tif(os.path.join(img_root, path+'.tif'), rgb=True, eq_method=eq)
+        for channel, im in enumerate(ims):
+            for coord, color in zip(coord_cols, colors):
+                im = draw_spots(im, df[coord].values/pixel_size, color=color)
+            cv2.imwrite(os.path.join(save_dir, path.rsplit('/', 1)[-1] + f'_{channel}.png'), im)
+
 
 if __name__ == '__main__':
     pass

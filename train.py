@@ -7,17 +7,17 @@ import json
 
 from .model import Resnet
 from .draw import *
-from .dataset import BlockLCoordDataset, SpotCoordDataset
+from .dataset import BlockCornerCoordDataset
 from .util import *
 
-def train_block_Lcoord_model(data_dirs, gal_dirs, va_size=.2, te_size=.2, down_sample=4,
-    window_expand=2, equalize=False, morphology=False, model=None, epochs=100, start_epoch=0,
-    chip_batch_size=4, batch_size=None, save_interval=5, output_dir='outputs/', device='cuda:0'):
+def train_block_corner_coord_model(data_dirs, gal_dirs, va_size=.2, te_size=.2, down_sample=4,
+    window_expand=2, equalize=False, morphology=False, augment=10, model=None, epochs=100, start_epoch=0,
+    chip_batch_size=1, batch_size=None, save_interval=5, output_dir='outputs/', device='cuda:0'):
 
     os.makedirs(os.path.join(output_dir, 'models'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'preds'), exist_ok=True)
 
-    dataset = BlockLCoordDataset(
+    dataset = BlockCornerCoordDataset(
         window_expand=window_expand,
         down_sample=down_sample,
         equalize=equalize, morphology=morphology)
@@ -28,7 +28,7 @@ def train_block_Lcoord_model(data_dirs, gal_dirs, va_size=.2, te_size=.2, down_s
     model = Resnet().to(device) if model == None else model.to(device)
     loss_func = nn.MSELoss(reduction='mean')
     # optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-3)
 
     # log file header
     write_file('epoch,tr_loss,va_loss',
@@ -40,7 +40,7 @@ def train_block_Lcoord_model(data_dirs, gal_dirs, va_size=.2, te_size=.2, down_s
         trdl_bar = tqdm(trdl, ncols=100)
         tr_losses = []
         for ims, gals, gprs in trdl_bar:
-            xb, yb, _ = dataset.imgs2xy(ims, gals, gprs, augment=True)
+            xb, yb = dataset.imgs2xy(ims, gals, gprs, augment=augment)
             # draw_xy(xb, yb); exit()
             if xb is None:
                 print("empty batch"); continue
@@ -62,7 +62,7 @@ def train_block_Lcoord_model(data_dirs, gal_dirs, va_size=.2, te_size=.2, down_s
         va_losses, xbs, ybs, ypredbs = [], [], [], []
         with torch.no_grad():
             for b, (ims, gals, gprs) in enumerate(vadl_bar):
-                xb, yb, _ = dataset.imgs2xy(ims, gals, gprs, augment=True)
+                xb, yb = dataset.imgs2xy(ims, gals, gprs, augment=True)
                 if xb is None:
                     print("empty batch")
                     continue
@@ -76,9 +76,9 @@ def train_block_Lcoord_model(data_dirs, gal_dirs, va_size=.2, te_size=.2, down_s
                 va_losses.append(va_loss)
                 vadl_bar.set_description(f'va loss: {va_loss:.3f}')
 
-                xbs.append(xb)
-                ybs.append(yb)
-                ypredbs.append(ypredb)
+                xbs.append(xb.cpu().numpy())
+                ybs.append(yb.cpu().numpy())
+                ypredbs.append(ypredb.cpu().numpy())
 
         # epoch end
         tr_loss_mean = np.array(tr_losses).mean()
@@ -89,20 +89,19 @@ def train_block_Lcoord_model(data_dirs, gal_dirs, va_size=.2, te_size=.2, down_s
 
         if epoch % save_interval == 0 and xbs is not None:
             torch.save(model, os.path.join(output_dir, f'models/{epoch}.pt'))
-            sample_imgs_block_Lcoord(xbs, ybs, ypredbs,
+            sample_imgs_block_corner_coord(xbs, ybs, ypredbs,
                 output_dir=os.path.join(output_dir, f'preds/e{epoch}/'))
 
-def sample_imgs_block_Lcoord(xbs, ybs, ypredbs, output_dir, n_samples=5):
+def sample_imgs_block_corner_coord(xbs, ybs, ypredbs, output_dir, n_samples=5):
     os.makedirs(output_dir, exist_ok=True)
     with torch.no_grad():
         for batch, (xb, yb, ypredb) in enumerate(zip(xbs, ybs, ypredbs)):
             for i, (x, y, ypred) in enumerate(zip(xb[:n_samples], yb[:n_samples], ypredb[:n_samples])):
-                im = np.expand_dims(x.cpu().numpy()[0], -1) * 255
-                im = cv2.cvtColor(im, cv2.COLOR_GRAY2RGB)
-                y = np.round(y.cpu().numpy()).astype(int)
-                ypred = np.round(ypred.cpu().numpy()).astype(int)
-                im = draw_parallelogram(im, y, color=(0,255,0))
-                im = draw_parallelogram(im, ypred, color=(255,0,0))
+                im = x2rgbimg(x)
+                y = y.reshape((-1, 2)).astype('int32')
+                ypred = ypred.reshape((-1, 2)).astype('int32')
+                draw_parallelogram(im, y, color=(0,255,0))
+                draw_parallelogram(im, ypred, color=(255,0,0))
                 cv2.imwrite(os.path.join(output_dir, f'b{batch}-{i}.png'), im)
 
 def train_spot_coord_model(data_dirs, gal_dirs, va_size=.2, te_size=.2, down_sample=4,

@@ -36,8 +36,7 @@ class Resnet(nn.Module):
         self.resnet.fc = nn.Linear(512, 6, bias=True)
 
     def forward(self, x):
-        x = self.resnet(x)
-        return x
+        return self.resnet(x)
 
 if '__main__' == __name__:
     pass

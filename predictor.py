@@ -1,33 +1,32 @@
 import torch
 import pandas as pd
 
-class ResnetPredictor():
-    def __init__(self, model_path, window_expand=2, down_sample=4,
-        equalize='clahe', morphology=True, device='cuda:0'):
+from .dataset import *
+from .util import *
+from .draw import *
 
+class BlockCornerCoordPredictor():
+    def __init__(self, model_path, window_expand=2, down_sample=4, pixel_size=10,
+            equalize=None, morphology=False, device='cuda:0'):
+        self.dataset = BlockCornerCoordDataset(window_expand, down_sample, equalize, morphology, pixel_size)
         self.window_expand = window_expand
         self.down_sample = down_sample
+        self.pixel_size = pixel_size
         self.equalize = equalize
         self.morphology = morphology
-
         self.device = device
-        self.model = torch.load(model_path).eval().to(device)
+        self.model = torch.load(model_path, map_location=device).eval()
         print('model loaded')
 
-    def predict_block_coords(self, img_path, gal_file):
+    def predict(self, img_path, gal):
         '''
         pedict 3 xy coords of all blocks in an image
         return:
             ypreds: coords respective to window coords
-            ypreds_ori: transform into big image pixel coords
             idxs: (img_path, block_no, channel)
         '''
-        gal = Gal(gal_file) if type(gal_file) == str else gal_file
-        xs, idxs = img2x(img_path, gal,
-            window_expand=self.window_expand,
-            down_sample=self.down_sample,
-            equalize=self.equalize,
-            morphology=self.morphology)
+        gal = Gal(gal) if type(gal) == str else gal
+        xs, idxs = self.dataset.img2x(img_path, gal)
 
         with torch.no_grad():
             xs = torch.tensor(xs).float().to(self.device)
@@ -35,17 +34,16 @@ class ResnetPredictor():
 
         idxs = pd.MultiIndex.from_tuples(idxs).set_names(['img_path', 'block'])
         cols = ['x1', 'y1', 'x2', 'y2', 'x3', 'y3']
-        coord_df = pd.DataFrame(ypreds, index=idxs, columns=cols)
+        coord_df = pd.DataFrame(ypreds, index=idxs, columns=cols) * self.down_sample
 
-        # add window offset and downsample back to original coords
+        # add window offset back to original coords
         for (img_path, b), block_coord_df in coord_df.groupby(['img_path', 'block']):
-            w_start, w_end = get_window_coords(b, gal, self.window_expand)
-            coord_df.loc[block_coord_df.index, ['x1', 'x2', 'x3']] = block_coord_df[['x1', 'x2', 'x3']] * self.down_sample + w_start[0]
-            coord_df.loc[block_coord_df.index, ['y1', 'y2', 'y3']] = block_coord_df[['y1', 'y2', 'y3']] * self.down_sample + w_start[1]
-        return coord_df
+            w_start, w_end = get_window_coords(b, gal, self.window_expand, pixel_size=self.pixel_size)
+            coord_df.loc[block_coord_df.index, ['x1', 'x2', 'x3']] = block_coord_df[['x1', 'x2', 'x3']] + w_start[0]
+            coord_df.loc[block_coord_df.index, ['y1', 'y2', 'y3']] = block_coord_df[['y1', 'y2', 'y3']] + w_start[1]
+        return self.to_spot_coords(coord_df, gal)
 
-    def to_spot_coords(self, block_coord_df, gal_file):
-        gal = Gal(gal_file) if type(gal_file) == str else gal_file
+    def to_spot_coords(self, block_coord_df, gal):
         idxs, coords = [], []
         for (img_path, b), df_row in block_coord_df.iterrows():
             n_cols = gal.header[f'Block{b}'][Gal.N_COLS]
@@ -65,7 +63,7 @@ class ResnetPredictor():
         idxs = pd.MultiIndex.from_tuples(idxs).set_names(['img_path', 'block', 'col', 'row'])
         return pd.DataFrame(coords, index=idxs, columns=['x', 'y'])
 
-class OldSchoolPredictor():
+class OldSchoolCoordPredictor():
     pass
 
 if __name__ == '__main__':

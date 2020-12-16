@@ -90,15 +90,15 @@ def cat_im_batches_by_pad(im_list):
         tmp = im_batch.shape[-2, -1].max()
         maxlen = tmp if tmp > maxlen else maxlen
 
-def get_window_coords(block, gal, expand_rate=2.):
+def get_window_coords(block, gal, expand_rate=2., pixel_size=10):
     block_info = gal.header[f'Block{block}']
     cx, cy = block_info[Gal.CENTER_X], block_info[Gal.CENTER_Y]
     w = block_info[Gal.COL_MARGIN] * (block_info[Gal.N_COLS]-1) * expand_rate
     h = block_info[Gal.ROW_MARGIN] * (block_info[Gal.N_ROWS]-1) * expand_rate
-    x1 = int((cx - w/2)*.1)
-    y1 = int((cy - h/2)*.1)
-    x2 = int((cx + w/2)*.1)
-    y2 = int((cy + h/2)*.1)
+    x1 = int((cx - w/2) / pixel_size)
+    y1 = int((cy - h/2) / pixel_size)
+    x2 = int((cx + w/2) / pixel_size)
+    y2 = int((cy + h/2) / pixel_size)
     return (x1, y1), (x2, y2)
 
 def crop_window(im, p1, p2, pad_val=0):

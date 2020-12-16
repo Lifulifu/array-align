@@ -5,6 +5,9 @@ from sklearn.model_selection import train_test_split
 import numpy as np
 import pandas as pd
 from pprint import pprint
+import imgaug
+from imgaug.augmentables.kps import Keypoint, KeypointsOnImage
+import imgaug.augmenters as aug
 
 import torch
 from torch.utils.data.dataset import Dataset
@@ -28,11 +31,13 @@ class ImgGalGprDataset(Dataset):
     def __len__(self):
         return len(self.ims)
 
-class AAADataset():
-    def __init__(self, window_expand=2, down_sample=4, equalize=False, morphology=False, pixel_size=10):
+class ArrayBlockDataset():
+    def __init__(self, window_expand=2, down_sample=4, equalize=False,
+            clahe_kwargs={'clipLimit': 20, 'tileGridSize': (8, 8)}, morphology=False, pixel_size=10):
         self.window_expand = window_expand
         self.down_sample = down_sample
         self.equalize = equalize
+        self.clahe_kwargs = clahe_kwargs
         self.morphology = morphology
         self.pixel_size = pixel_size
 
@@ -59,7 +64,7 @@ class AAADataset():
             p1, p2 = get_window_coords(b, gal, expand_rate=self.window_expand)
             cropped = crop_window(im, p1, p2).astype('uint8')
             cropped = cv2.resize(cropped, (cropped.shape[1]//self.down_sample, cropped.shape[0]//self.down_sample))
-            if self.equalize: cropped = im_equalize(cropped, method=self.equalize)
+            if self.equalize: cropped = im_equalize(cropped, method=self.equalize, clahe_kwargs=self.clahe_kwargs)
             if self.morphology: cropped = im_morphology(cropped)
             xs.append(cropped)
 
@@ -94,11 +99,24 @@ class AAADataset():
             DataLoader(ImgGalGprDataset(imva, galva, gprva), batch_size=batch_size),
             DataLoader(ImgGalGprDataset(imte, galte, gprte), batch_size=batch_size))
 
-class BlockLCoordDataset(AAADataset):
+class BlockCornerCoordDataset(ArrayBlockDataset):
     def __init__(self, window_expand=2, down_sample=4, equalize=False, morphology=False, pixel_size=10):
         super().__init__(window_expand, down_sample, equalize, morphology, pixel_size)
+        self.aug_seq = aug_seq = aug.Sequential([
+            aug.HorizontalFlip(0.5),
+            aug.VerticalFlip(0.5),
+            aug.Sometimes(0.5, aug.GaussianBlur(sigma=(0, 0.2))),
+            aug.LinearContrast((0.8, 1.2)),
+            aug.AdditiveGaussianNoise(scale=(0.0, 0.05*255)),
+            aug.Multiply((0.8, 1.2)),
+            aug.Affine(
+                scale=(0.7, 1),
+                translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)},
+                rotate=(-10, 10),
+            )
+        ], random_order=True)
 
-    def img2xy(self, img_path, gal, gpr_file, augment=True):
+    def img2xy(self, img_path, gal, gpr, augment=0):
         '''
         Single img file to xys for all blocks and channels
 
@@ -113,50 +131,37 @@ class BlockLCoordDataset(AAADataset):
             idx:
                 (img_path, block) for one x sample
         '''
-
-        ims = read_tif(img_path)
-        if ims:
-            im = np.stack(ims).max(axis=0)
-        else:
-            print(f'failed to read img {img_path}, skip.')
-            return None, None, None
-
-        gpr = Gpr(gpr_file) if type(gpr_file) == str else gpr_file
-        xs, ys, idxs = [], [], []
-
-        for b in range(1, gal.header['BlockCount']+1):
-            idxs.append((img_path, b))
-            n_rows = gal.header[f'Block{b}'][Gal.N_ROWS]
-            n_cols = gal.header[f'Block{b}'][Gal.N_COLS]
+        imgs, idxs = self.img2x(img_path, gal) # imgs: (N, 1, h, w)
+        h, w = imgs.shape[2], imgs.shape[3]
+        gpr = Gpr(gpr) if type(gpr) == str else gpr
+        xs, ys = [], []
+        for img, (img_path, b) in zip(imgs, idxs):
+            nrows = gal.header[f'Block{b}'][Gal.N_ROWS]
+            ncols = gal.header[f'Block{b}'][Gal.N_COLS]
             p1, p2 = get_window_coords(b, gal, expand_rate=self.window_expand)
-            cropped = crop_window(im, p1, p2).astype('uint8')
-            cropped = cv2.resize(cropped, (cropped.shape[1]//self.down_sample, cropped.shape[0]//self.down_sample))
-            if self.equalize: cropped = im_equalize(cropped, method=self.equalize)
-            if self.morphology: cropped = im_morphology(cropped)
-            xs.append(cropped)
+            # minus window offset
+            block_df = (gpr.data.loc[b][['X', 'Y']] / self.pixel_size - np.array(p1)) / self.down_sample
+            kpts = KeypointsOnImage([
+                Keypoint(x=block_df.loc[1, 1]['X'], y=block_df.loc[1, 1]['Y']),
+                Keypoint(x=block_df.loc[1, ncols]['X'], y=block_df.loc[1, ncols]['Y']),
+                Keypoint(x=block_df.loc[nrows, ncols]['X'], y=block_df.loc[nrows, ncols]['Y']),
+                Keypoint(x=block_df.loc[nrows, 1]['X'], y=block_df.loc[nrows, 1]['Y'])
+            ], shape=(h, w))
 
-            y = np.array([
-                gpr.data.loc[b, 1, 1]['X'] / self.pixel_size - p1[0],
-                gpr.data.loc[b, 1, 1]['Y'] / self.pixel_size - p1[1],
-                gpr.data.loc[b, n_rows, 1]['X'] / self.pixel_size - p1[0],
-                gpr.data.loc[b, n_rows, 1]['Y'] / self.pixel_size - p1[1],
-                gpr.data.loc[b, n_rows, n_cols]['X'] / self.pixel_size - p1[0],
-                gpr.data.loc[b, n_rows, n_cols]['Y'] / self.pixel_size - p1[1]
-            ]) / self.down_sample
-            ys.append(y)
+            if augment <= 0:
+                xs.append(img)
+                coord = self.to_Lcoord(kpts.to_xy_array())
+                ys.append(coord.flatten())
+            else:
+                for i in range(augment):
+                    img_aug, kpts_aug = self.aug_seq(image=(img[0]*255).astype('uint8'), keypoints=kpts) # img: (1, w, h) -> (w, h)
+                    coord = self.to_Lcoord(kpts_aug.to_xy_array()) # (3, 2)
+                    if (coord[:, 0].max() >= w) or (coord[:, 1].max() >= h) or (coord[:, 0].min() < 0) or (coord[:, 1].min() < 0):
+                        continue # skip if coord out of bounds
+                    xs.append(np.array([img_aug/255]))
+                    ys.append(coord.flatten())
 
-            if augment:
-                fourth_pt = np.array([
-                    gpr.data.loc[b, 1, n_cols]['X'] / self.pixel_size - p1[0],
-                    gpr.data.loc[b, 1, n_cols]['Y'] / self.pixel_size - p1[1],
-                ]) / self.down_sample
-                flipx, flipy = self.flip_augment(cropped, np.concatenate((y, fourth_pt)))
-                offsetx, offsety = self.offset_augment(cropped, y, n_samples=4)
-                xs = xs + flipx + offsetx # list concat
-                ys = ys + flipy + offsety
-
-        xs = np.stack(xs)
-        return np.expand_dims(xs, axis=1)/255, np.stack(ys), idxs
+        return np.stack(xs), np.stack(ys)
 
     def imgs2xy(self, img_paths, gal_paths, gpr_paths, augment=True):
         '''
@@ -164,103 +169,26 @@ class BlockLCoordDataset(AAADataset):
         args: lists of img and gpr paths
         returns: aggregated x, y nparrays
         '''
-        xs, ys, idxs = [], [], []
+        xs, ys = [], []
         for img_path, gal_path, gpr_path in zip(img_paths, gal_paths, gpr_paths):
-            x, y, idx = self.img2xy(img_path, self.gal_mem[gal_path], gpr_path, augment=augment)
+            x, y = self.img2xy(img_path, self.gal_mem[gal_path], gpr_path, augment=augment)
             if (x is not None) and (y is not None):
                 xs.append(x)
                 ys.append(y)
-                idxs.append(idx)
         # pass if all cropped images are of same shape
         xs, ys = np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
-        idxs = np.concatenate(idxs, axis=0)
-        return xs, ys, idxs
+        return xs, ys
 
-    def to_four_pts(self, pts):
+    def to_Lcoord(self, coord):
         '''
-        pts: 3 pts parellelgram
-        returns: 4 pts (shape 4*2)
+        coord: (4, 2) not sorted -> (3, 2) sorted L coord
         '''
-        if pts.shape != (3, 2): pts = pts.reshape(3, 2)
-        fourth_pt = pts[2] + (pts[0] - pts[1])
-        return np.concatenate((pts, fourth_pt.reshape(1, -1)), axis=0)
+        coord = coord[np.argsort(coord[:, 0])] # sort by x
+        coord[:2] = coord[:2][np.argsort(coord[:2][:, 1])] # left 2 points sort by y
+        coord[2:] = coord[2:][np.argsort(coord[2:][:, 1])] # right 2 points sort by y
+        return coord[[0, 1, 3]] # top left, bottom left, bottom right
 
-    def augment_im(self, im, pts, **kwargs):
-        '''
-        im: 2D np array
-        '''
-        flipxs, flipys = self.flip_augment(im, pts)
-        augxs, augys = [], []
-        for flipx, flipy in zip(flipxs, flipys):
-            offsetxs, offsetys = self.offset_augment(flipx, flipy, **kwargs)
-            augxs += offsetxs
-            augys += offsetys
-        augxs += flipxs
-        augys += flipys
-        return augxs, augys
-
-    def offset_augment(self, im, pts, n_samples=1, max_offset=(.5, .5)):
-        '''
-        pts: 3 points
-        max_offset: (x, y)
-        '''
-        pts = pts.reshape(3, 2)
-        augx, augy = [], []
-        h, w = im.shape
-        max_offset = np.array(max_offset) * np.array([w, h])
-        for i in range(100):
-            rand = np.random.rand(2) * 2 - 1
-            offset = rand * max_offset
-            offset_pts = (pts + offset).astype(int)
-            if (offset_pts.min()) >= 0 and (offset_pts[:, 0].max() < w) and (offset_pts[:, 1].max() < h):
-                m = np.array([[1, 0, offset[0]],
-                            [0, 1, offset[1]]])
-                augx.append(cv2.warpAffine(im, m, (w, h))) # offset transform
-                augy.append(offset_pts.flatten())
-                if len(augx) >= n_samples:
-                    return augx, augy
-        return augx, augy
-
-    def flip_augment(self, im, pts):
-        '''
-        pts: 4 points: (x1, y1, ... x4, y4)
-        '''
-        pts = pts.reshape(4, 2)
-        augx, augy = [], []
-        h, w = im.shape
-        # horizontal flip
-        augx.append(cv2.flip(im, 1))
-        augy.append(np.array([
-            w - pts[3, 0],
-            pts[3, 1],
-            w - pts[2, 0],
-            pts[2, 1],
-            w - pts[1, 0],
-            pts[1, 1]
-        ]))
-        # vertical flip
-        augx.append(cv2.flip(im, 0))
-        augy.append(np.array([
-            pts[1, 0],
-            h - pts[1, 1],
-            pts[0, 0],
-            h - pts[0, 1],
-            pts[3, 0],
-            h - pts[3, 1]
-        ]))
-        # vertical + horizontal
-        augx.append(cv2.flip(im, -1))
-        augy.append(np.array([
-            w - pts[2, 0],
-            h - pts[2, 1],
-            w - pts[3, 0],
-            h - pts[3, 1],
-            w - pts[0, 0],
-            h - pts[0, 1]
-        ]))
-        return augx, augy # list of arrays
-
-class SpotCoordDataset(AAADataset):
+class SpotHeatMapDataset(ArrayBlockDataset):
     def __init__(self, window_expand=2, down_sample=4, equalize=False, morphology=False, pixel_size=10):
         super().__init__(window_expand, down_sample, equalize, morphology, pixel_size)
 
@@ -306,15 +234,7 @@ class SpotCoordDataset(AAADataset):
                 y[y_idx, x_idx] = 1
             ys.append(y)
 
-            # if augment:
-            #     fourth_pt = np.array([
-            #         gpr.data.loc[b, 1, n_cols]['X'] / self.pixel_size - p1[0],
-            #         gpr.data.loc[b, 1, n_cols]['Y'] / self.pixel_size - p1[1],
-            #     ]) / self.down_sample
-            #     flipx, flipy = self.flip_augment(cropped, np.concatenate((y, fourth_pt)))
-            #     offsetx, offsety = self.offset_augment(cropped, y, n_samples=4)
-            #     xs = xs + flipx + offsetx # list concat
-            #     ys = ys + flipy + offsety
+            #! augmentation, not implemented
 
         xs = np.stack(xs)
         return np.expand_dims(xs, axis=1)/255, np.stack(ys), idxs
