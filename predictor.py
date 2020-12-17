@@ -1,13 +1,15 @@
+import cv2
 import torch
+import numpy as np
 import pandas as pd
 
-from .dataset import *
-from .util import *
-from .draw import *
+from dataset import *
+from util import *
+from draw import *
 
 class BlockCornerCoordPredictor():
     def __init__(self, model_path, window_expand=2, down_sample=4, pixel_size=10,
-            equalize=None, morphology=False, device='cuda:0'):
+            equalize=None, morphology=False, device='cuda:1'):
         self.dataset = BlockCornerCoordDataset(window_expand, down_sample, equalize, morphology, pixel_size)
         self.window_expand = window_expand
         self.down_sample = down_sample
@@ -18,7 +20,7 @@ class BlockCornerCoordPredictor():
         self.model = torch.load(model_path, map_location=device).eval()
         print('model loaded')
 
-    def predict(self, img_path, gal):
+    def predict(self, img_path, gal, finetune=False, spot_radius=5):
         '''
         pedict 3 xy coords of all blocks in an image
         return:
@@ -41,7 +43,75 @@ class BlockCornerCoordPredictor():
             w_start, w_end = get_window_coords(b, gal, self.window_expand, pixel_size=self.pixel_size)
             coord_df.loc[block_coord_df.index, ['x1', 'x2', 'x3']] = block_coord_df[['x1', 'x2', 'x3']] + w_start[0]
             coord_df.loc[block_coord_df.index, ['y1', 'y2', 'y3']] = block_coord_df[['y1', 'y2', 'y3']] + w_start[1]
-        return self.to_spot_coords(coord_df, gal)
+
+        def create_mask(radius):
+            row, col = radius*2+1, radius*2+1
+            center_row, center_col = radius, radius
+            Y, X = np.ogrid[: row, : col]
+            dist_from_center = np.sqrt((Y-center_row)**2 + (X-center_col)**2)
+            mask = dist_from_center <= radius
+            return mask.astype('int')
+
+        def get_brightness(img, centers, radius):
+            brightness = []
+            mask = create_mask(radius=radius)
+            for center in centers:
+                x, y = int(round(center[0])), int(round(center[1]))
+                crop = img[y-radius: y+radius+1, x-radius: x+radius+1]
+                b = (crop * mask).sum()
+                brightness.append(b)
+            return np.array(brightness)
+
+        if finetune:
+            img = cv2.imread(img_path, 0)
+            spot_coords_df = self.to_spot_coords(coord_df, gal)
+            spot_xs = spot_coords_df['x']
+            spot_ys = spot_coords_df['y']
+            spot_coords = list(zip(spot_xs, spot_ys))
+
+            stop = False
+            while not stop:
+                four_direction_centers = []
+                four_direction_brightness = np.zeros(4)
+                curr_brightness = 0
+                for i, (x, y) in enumerate(spot_coords):
+                    curr_four_direction_centers = [(x, y-1), (x, y+1), (x-1, y), (x+1, y)]
+                    four_direction_centers.append(curr_four_direction_centers)
+                    four_direction_brightness += get_brightness(img, curr_four_direction_centers, radius=spot_radius)
+                    curr_brightness += get_brightness(img, [(x, y)], radius=spot_radius)[0]
+
+                # print(four_direction_brightness)
+                if max(four_direction_brightness) > curr_brightness:
+                    spot_coords = list(zip(*four_direction_centers))[np.argmax(four_direction_brightness)]
+                else:
+                    stop = True
+
+            spot_coords = list(spot_coords)
+
+            for i in range(len(spot_coords)):
+                brighter = True
+                tmp = []
+                while brighter:
+                    brighter = False
+                    x, y = spot_coords[i]
+                    forward_direction_centers = [(x, y-1), (x, y+1), (x-1, y), (x+1, y)]
+                    if tmp:
+                        forward_direction_centers.remove(tmp)
+                    forward_direction_brightness = get_brightness(img, forward_direction_centers, radius=spot_radius)
+                    curr_brightness = get_brightness(img, [(x, y)], radius=spot_radius)[0]
+                    tmp = spot_coords[i]
+
+                    if max(forward_direction_brightness) > curr_brightness:
+                        spot_coords[i] = forward_direction_centers[np.argmax(forward_direction_brightness)]
+                        brighter = True
+
+            finetune_xs, finetune_ys = list(zip(*spot_coords))
+            spot_coords_df['x'] = finetune_xs
+            spot_coords_df['y'] = finetune_ys
+            return spot_coords_df
+
+        else:
+            return self.to_spot_coords(coord_df, gal)
 
     def to_spot_coords(self, block_coord_df, gal):
         idxs, coords = [], []
