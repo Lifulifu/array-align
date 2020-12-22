@@ -3,9 +3,9 @@ import torch
 import numpy as np
 import pandas as pd
 
-from dataset import *
-from util import *
-from draw import *
+from .dataset import *
+from .util import *
+from .draw import *
 
 class BlockCornerCoordPredictor():
     def __init__(self, model_path, window_expand=2, down_sample=4, pixel_size=10,

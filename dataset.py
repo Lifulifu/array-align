@@ -102,7 +102,7 @@ class ArrayBlockDataset():
 class BlockCornerCoordDataset(ArrayBlockDataset):
     def __init__(self, window_expand=2, down_sample=4, equalize=False, morphology=False, pixel_size=10):
         super().__init__(window_expand, down_sample, equalize, morphology, pixel_size)
-        self.aug_seq = aug_seq = aug.Sequential([
+        self.aug_seq = aug.Sequential([
             aug.HorizontalFlip(0.5),
             aug.VerticalFlip(0.5),
             aug.Sometimes(0.5, aug.GaussianBlur(sigma=(0, 0.2))),
@@ -163,7 +163,7 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
 
         return np.stack(xs), np.stack(ys)
 
-    def imgs2xy(self, img_paths, gal_paths, gpr_paths, augment=True):
+    def imgs2xy(self, img_paths, gal_paths, gpr_paths, augment=0):
         '''
         List of img files to xy for all blocks
         args: lists of img and gpr paths
@@ -192,7 +192,7 @@ class SpotHeatMapDataset(ArrayBlockDataset):
     def __init__(self, window_expand=2, down_sample=4, equalize=False, morphology=False, pixel_size=10):
         super().__init__(window_expand, down_sample, equalize, morphology, pixel_size)
 
-    def img2xy(self, img_path, gal, gpr_file, augment=True):
+    def img2xy(self, img_path, gal, gpr, augment=0):
         '''
         Single img file to xys for all blocks and channels
         returns:
@@ -206,38 +206,32 @@ class SpotHeatMapDataset(ArrayBlockDataset):
             idx:
                 (img_path, block) for one x sample
         '''
-        ims = read_tif(img_path)
-        if ims:
-            im = np.stack(ims).max(axis=0)
-        else:
-            print(f'failed to read img {img_path}, skip.')
-            return None, None, None
-
-        gpr = Gpr(gpr_file) if type(gpr_file) == str else gpr_file
-        xs, ys, idxs = [], [], []
-
-        for b in range(1, gal.header['BlockCount']+1):
-            idxs.append((img_path, b))
-            n_rows = gal.header[f'Block{b}'][Gal.N_ROWS]
-            n_cols = gal.header[f'Block{b}'][Gal.N_COLS]
+        imgs, idxs = self.img2x(img_path, gal) # imgs: (N, 1, h, w)
+        h, w = imgs.shape[2], imgs.shape[3]
+        gpr = Gpr(gpr) if type(gpr) == str else gpr
+        xs, ys = [], []
+        for img, (img_path, b) in zip(imgs, idxs):
             p1, p2 = get_window_coords(b, gal, expand_rate=self.window_expand)
-            cropped = crop_window(im, p1, p2).astype('uint8')
-            cropped = cv2.resize(cropped, (cropped.shape[1]//self.down_sample, cropped.shape[0]//self.down_sample))
-            if self.equalize: cropped = im_equalize(cropped, method=self.equalize)
-            if self.morphology: cropped = im_morphology(cropped)
-            xs.append(cropped)
+            # minus window offset
+            block_df = (gpr.data.loc[b][['X', 'Y']] / self.pixel_size - np.array(p1)) / self.down_sample
+            kpts = [Keypoint(x=df_row['X'], y=df_row['Y']) for idx, df_row in block_df.iterrows()]
+            kpts = KeypointsOnImage(kpts, shape=(h, w))
 
-            y = np.zeros(cropped.shape)
-            for idx, df_row in gpr.data.loc[b].iterrows():
-                x_idx = int((df_row['X'] / self.pixel_size - p1[0]) / self.down_sample)
-                y_idx = int((df_row['Y'] / self.pixel_size - p1[1]) / self.down_sample)
-                y[y_idx, x_idx] = 1
-            ys.append(y)
+            if augment <= 0:
+                xs.append(img)
+                heatmap = self.coord2heatmap(kpts.to_xy_array(), img.shape)
+                ys.append(heatmap)
+            else:
+                for i in range(augment):
+                    img_aug, kpts_aug = self.aug_seq(image=(img[0]*255).astype('uint8'), keypoints=kpts) # img: (1, w, h) -> (w, h)
+                    kpts_aug = kpts_aug.to_xy_array()
+                    if (kpts_aug[:, 0].max() >= w) or (kpts_aug[:, 1].max() >= h) or (kpts_aug[:, 0].min() < 0) or (kpts_aug[:, 1].min() < 0):
+                        continue # skip if coord out of bounds
+                    heatmap = self.coord2heatmap(kpts_aug, img.shape)
+                    xs.append(np.array([img_aug/255]))
+                    ys.append(heatmap)
 
-            #! augmentation, not implemented
-
-        xs = np.stack(xs)
-        return np.expand_dims(xs, axis=1)/255, np.stack(ys), idxs
+        return np.stack(xs), np.stack(ys)
 
     def imgs2xy(self, img_paths, gal_paths, gpr_paths, augment=True):
         '''
@@ -256,6 +250,14 @@ class SpotHeatMapDataset(ArrayBlockDataset):
         xs, ys = np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
         idxs = np.concatenate(idxs, axis=0)
         return xs, ys, idxs
+
+    def coord2heatmap(self, coords, img_shape):
+        '''
+        coords: (n, 2) for n spots in one block
+        '''
+        result = np.zeros(img_shape)
+        result[coords[:, 1].astype(int), coords[:, 0].astype(int)] = 1 # result[y, x]
+        return result
 
 if '__main__' == __name__:
     pass

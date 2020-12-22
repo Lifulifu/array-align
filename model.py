@@ -31,6 +31,7 @@ class Resnet(nn.Module):
     def __init__(self):
         super().__init__()
         self.resnet = models.resnet18(pretrained=False)
+        print(self.resnet)
         self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.resnet.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.resnet.fc = nn.Linear(512, 6, bias=True)
@@ -38,5 +39,21 @@ class Resnet(nn.Module):
     def forward(self, x):
         return self.resnet(x)
 
-if '__main__' == __name__:
+class Resnext(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.resnext = torch.hub.load('pytorch/vision:v0.6.0', 'resnext50_32x4d', pretrained=True)
+        print(self.resnext)
+        # self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        # self.resnet.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        # self.resnet.fc = nn.Linear(512, 6, bias=True)
+
+    def forward(self, x):
+        return self.resnext(x)
+
+class Unet(nn.Module):
     pass
+
+
+if '__main__' == __name__:
+    m = Resnext()
