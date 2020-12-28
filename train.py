@@ -13,7 +13,7 @@ from .dataset import BlockCornerCoordDataset
 from .util import *
 
 def train_block_corner_coord_model(data_dirs, gal_dirs, va_size=.2, te_size=.2, down_sample=4,
-        window_expand=2, equalize=False, morphology=False, augment=10, model=None, epochs=100, start_epoch=0,
+        window_expand=2, equalize=False, morphology=False, augment=10, model=None, epochs=100, start_epoch=1,
         chip_batch_size=1, batch_size=None, save_interval=5, output_dir='outputs/', device='cuda:0'):
 
     os.makedirs(os.path.join(output_dir, 'models'), exist_ok=True)
@@ -29,8 +29,8 @@ def train_block_corner_coord_model(data_dirs, gal_dirs, va_size=.2, te_size=.2, 
 
     model = Resnet().to(device) if model is None else model.to(device)
     loss_func = nn.MSELoss(reduction='mean')
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     # log file header
     write_file('epoch,tr_loss,va_loss',

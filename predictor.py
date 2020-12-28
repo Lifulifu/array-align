@@ -44,7 +44,6 @@ class BlockCornerCoordPredictor():
             coord_df.loc[block_coord_df.index, ['x1', 'x2', 'x3']] = block_coord_df[['x1', 'x2', 'x3']] + w_start[0]
             coord_df.loc[block_coord_df.index, ['y1', 'y2', 'y3']] = block_coord_df[['y1', 'y2', 'y3']] + w_start[1]
 
-
         if finetune:
             return self.finetune_spot_coords(coord_df, gal, img_path, spot_radius)
         else:

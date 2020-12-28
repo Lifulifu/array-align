@@ -104,8 +104,8 @@ def draw_cohort_df_coords(cohort_df, coord_cols:List[list], colors:List[tuple]=[
     for path, df in cohort_df.groupby(['path']):
         ims = read_tif(os.path.join(img_root, path+'.tif'), rgb=True, eq_method=eq)
         for channel, im in enumerate(ims):
-            for coord, color in zip(coord_cols, colors):
-                im = draw_spots(im, df[coord].values/pixel_size, color=color)
+            for coord_col, color in zip(coord_cols, colors):
+                im = draw_spots(im, df[coord_col].values/pixel_size, color=color)
             cv2.imwrite(os.path.join(save_dir, path.rsplit('/', 1)[-1] + f'_{channel}.png'), im)
 
 

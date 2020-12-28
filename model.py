@@ -31,10 +31,10 @@ class Resnet(nn.Module):
     def __init__(self):
         super().__init__()
         self.resnet = models.resnet18(pretrained=False)
-        print(self.resnet)
         self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.resnet.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.resnet.fc = nn.Linear(512, 6, bias=True)
+        # print(self.resnet)
 
     def forward(self, x):
         return self.resnet(x)
@@ -56,4 +56,4 @@ class Unet(nn.Module):
 
 
 if '__main__' == __name__:
-    m = Resnext()
+    m = Resnet()

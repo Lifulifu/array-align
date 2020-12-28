@@ -41,6 +41,7 @@ class ArrayBlockDataset():
         self.morphology = morphology
         self.pixel_size = pixel_size
 
+
     def img2x(self, img_path, gal):
         '''
         Single img file to xs for all blocks and fused channels
@@ -101,7 +102,8 @@ class ArrayBlockDataset():
 
 class BlockCornerCoordDataset(ArrayBlockDataset):
     def __init__(self, window_expand=2, down_sample=4, equalize=False, morphology=False, pixel_size=10):
-        super().__init__(window_expand, down_sample, equalize, morphology, pixel_size)
+        super().__init__(window_expand=window_expand, down_sample=down_sample, equalize=equalize,
+            morphology=morphology, pixel_size=pixel_size)
         self.aug_seq = aug.Sequential([
             aug.HorizontalFlip(0.5),
             aug.VerticalFlip(0.5),
@@ -190,7 +192,8 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
 
 class SpotHeatMapDataset(ArrayBlockDataset):
     def __init__(self, window_expand=2, down_sample=4, equalize=False, morphology=False, pixel_size=10):
-        super().__init__(window_expand, down_sample, equalize, morphology, pixel_size)
+        super().__init__(window_expand=window_expand, down_sample=down_sample, equalize=equalize,
+            morphology=morphology, pixel_size=pixel_size)
 
     def img2xy(self, img_path, gal, gpr, augment=0):
         '''
