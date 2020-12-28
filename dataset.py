@@ -31,6 +31,14 @@ class ImgGalGprDataset(Dataset):
     def __len__(self):
         return len(self.ims)
 
+class BlockSizeAugmentor():
+    def __init__(self, shrink_range=(1, 2)):
+        self.shrink_range = shrink_range
+
+    def augment(self, img, coord_df):
+        pass
+        # return aug_img, aug_coord_df
+
 class ArrayBlockDataset():
     def __init__(self, window_expand=2, down_sample=4, equalize=False,
             clahe_kwargs={'clipLimit': 20, 'tileGridSize': (8, 8)}, morphology=False, pixel_size=10):
@@ -40,37 +48,57 @@ class ArrayBlockDataset():
         self.clahe_kwargs = clahe_kwargs
         self.morphology = morphology
         self.pixel_size = pixel_size
+        self.block_size_augmentor = BlockSizeAugmentor()
 
+    def check_out_of_bounds(self, img_shape, coord):
+        h, w = img_shape
+        return (coord[:, 0].max() >= w) or (coord[:, 1].max() >= h) or (coord[:, 0].min() < 0) or (coord[:, 1].min() < 0)
 
-    def img2x(self, img_path, gal):
+    def block_size_augmentation(img, coord_df, ):
+        pass
+        # return aug_img, aug_coord_df
+
+    def img2xy(self, img_path, gal, gpr=None, block_size_aug=False):
         '''
         Single img file to xs for all blocks and fused channels
         returns:
             xs:
                 cropped window, grayscale[0~255]=>[0~1]
                 shape ( #blocks, 1, win_shape[0], win_shape[1] )
-            idx:
+            coords:
+                list of df, each spot coord in the block
+            idxs:
                 (img_path, block) for one x sample
         '''
         ims = read_tif(img_path)
+        gpr = Gpr(gpr) if (gpr and type(gpr) == str) else gpr
         if ims:
             im = np.stack(ims).max(axis=0) # fuse img channels
         else:
             print(f'failed to read img {img_path}, skip.')
-            return None, None
+            return None, None, None
 
-        xs, idxs = [], []
+        xs, coords, idxs = [], [], []
         for b in range(1, gal.header['BlockCount']+1):
             idxs.append((img_path, b))
             p1, p2 = get_window_coords(b, gal, expand_rate=self.window_expand)
             cropped = crop_window(im, p1, p2).astype('uint8')
-            cropped = cv2.resize(cropped, (cropped.shape[1]//self.down_sample, cropped.shape[0]//self.down_sample))
+            h, w = cropped.shape
+            cropped = cv2.resize(cropped, (w//self.down_sample, h//self.down_sample))
             if self.equalize: cropped = im_equalize(cropped, method=self.equalize, clahe_kwargs=self.clahe_kwargs)
             if self.morphology: cropped = im_morphology(cropped)
             xs.append(cropped)
 
+            if gpr is not None:
+                coord_df = (gpr.data.loc[b][['X', 'Y']] / self.pixel_size - np.array(p1)) / self.down_sample
+                coords.append(coord_df)
+
+                if block_size_aug > 0:
+                    for _ in range(block_size_aug):
+                        aug_img, aug_coord_df = self.block_size_augmentor.augment(cropped, coord_df)
+
         xs = np.stack(xs)
-        return np.expand_dims(xs, axis=1)/255, idxs
+        return idxs, np.expand_dims(xs, axis=1)/255, coords
 
     def get_dataloaders(self, dirs, gal_paths, va_size=.2, te_size=.2, batch_size=1, save_dir=None):
         '''
@@ -133,16 +161,13 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
             idx:
                 (img_path, block) for one x sample
         '''
-        imgs, idxs = self.img2x(img_path, gal) # imgs: (N, 1, h, w)
+        idxs, imgs, coords = super().img2xy(img_path, gal, gpr) # imgs: (N, 1, h, w)
         h, w = imgs.shape[2], imgs.shape[3]
         gpr = Gpr(gpr) if type(gpr) == str else gpr
         xs, ys = [], []
-        for img, (img_path, b) in zip(imgs, idxs):
+        for (img_path, b), img, block_df in zip(idxs, imgs, coords):
             nrows = gal.header[f'Block{b}'][Gal.N_ROWS]
             ncols = gal.header[f'Block{b}'][Gal.N_COLS]
-            p1, p2 = get_window_coords(b, gal, expand_rate=self.window_expand)
-            # minus window offset
-            block_df = (gpr.data.loc[b][['X', 'Y']] / self.pixel_size - np.array(p1)) / self.down_sample
             kpts = KeypointsOnImage([
                 Keypoint(x=block_df.loc[1, 1]['X'], y=block_df.loc[1, 1]['Y']),
                 Keypoint(x=block_df.loc[1, ncols]['X'], y=block_df.loc[1, ncols]['Y']),
@@ -158,7 +183,7 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
                 for i in range(augment):
                     img_aug, kpts_aug = self.aug_seq(image=(img[0]*255).astype('uint8'), keypoints=kpts) # img: (1, w, h) -> (w, h)
                     coord = self.to_Lcoord(kpts_aug.to_xy_array()) # (3, 2)
-                    if (coord[:, 0].max() >= w) or (coord[:, 1].max() >= h) or (coord[:, 0].min() < 0) or (coord[:, 1].min() < 0):
+                    if self.check_out_of_bounds(img_aug.shape, coord):
                         continue # skip if coord out of bounds
                     xs.append(np.array([img_aug/255]))
                     ys.append(coord.flatten())
@@ -191,6 +216,7 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
         return coord[[0, 1, 3]] # top left, bottom left, bottom right
 
 class SpotHeatMapDataset(ArrayBlockDataset):
+    #!! changes of super().img2xy() not dealt with
     def __init__(self, window_expand=2, down_sample=4, equalize=False, morphology=False, pixel_size=10):
         super().__init__(window_expand=window_expand, down_sample=down_sample, equalize=equalize,
             morphology=morphology, pixel_size=pixel_size)
