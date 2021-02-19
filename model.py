@@ -4,56 +4,89 @@ import torch.nn.functional as F
 import torchvision.models as models
 # import IPython; IPython.embed(); exit()
 
-class ResBlock(nn.Module):
-    def __init__(self, inchannel, outchannel, stride=1):
-        super(ResBlock, self).__init__()
-        self.left = nn.Sequential(
-            nn.Conv2d(inchannel, outchannel, kernel_size=3, stride=stride, padding=1, bias=False),
-            nn.BatchNorm2d(outchannel),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(outchannel, outchannel, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(outchannel)
-        )
-        self.shortcut = nn.Sequential()
-        if stride != 1 or inchannel != outchannel:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(inchannel, outchannel, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(outchannel)
-            )
-
-    def forward(self, x):
-        out = self.left(x)
-        out = out + self.shortcut(x)
-        out = F.relu(out)
-        return out
-
 class Resnet(nn.Module):
     def __init__(self):
         super().__init__()
-        self.resnet = models.resnet18(pretrained=False)
+        self.resnet = models.resnet18(pretrained=True)
         self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.resnet.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.resnet.fc = nn.Linear(512, 6, bias=True)
-        # print(self.resnet)
 
     def forward(self, x):
         return self.resnet(x)
 
-class Resnext(nn.Module):
+class SlidingWindowHourglassNet(nn.Module):
     def __init__(self):
         super().__init__()
-        self.resnext = torch.hub.load('pytorch/vision:v0.6.0', 'resnext50_32x4d', pretrained=True)
-        print(self.resnext)
-        # self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        # self.resnet.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.resnet.fc = nn.Linear(512, 6, bias=True)
+        resnet = models.resnet18(pretrained=False) # downsample * 6
+        resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.down = torch.nn.Sequential(*(list(resnet.children())[:-2]))
+        self.up = self._make_up_layers(512, [256, 256, 256, 128, 128])
+        self.final_layer = nn.Conv2d( # channels: confidence, x1, y1, x2, y2, x3, y3
+            in_channels=128,
+            out_channels=7,
+            kernel_size=3,
+            stride=1,
+            padding=1)
+
+    def _make_up_layers(self, in_planes, num_planes):
+        layers = []
+        for planes in num_planes:
+            layers.append(
+                nn.ConvTranspose2d(
+                    in_channels=in_planes,
+                    out_channels=planes,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    output_padding=1))
+            layers.append(nn.BatchNorm2d(planes))
+            layers.append(nn.ReLU(inplace=True))
+            in_planes = planes
+        return nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.resnext(x)
+        x = self.down(x)
+        x = self.up(x)
+        return self.final_layer(x)
 
-class Unet(nn.Module):
-    pass
+class HourglassNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        resnet = models.resnet18(pretrained=False) # downsample * 6
+        resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.down = torch.nn.Sequential(*(list(resnet.children())[:-2]))
+        self.up = self._make_up_layers(512, [256, 256, 256, 128, 128])
+        self.final_layer = nn.Conv2d(
+            in_channels=128,
+            out_channels=3,
+            kernel_size=3,
+            stride=1,
+            padding=1)
+
+    def _make_up_layers(self, in_planes, num_planes):
+        layers = []
+        for planes in num_planes:
+            layers.append(
+                nn.ConvTranspose2d(
+                    in_channels=in_planes,
+                    out_channels=planes,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    output_padding=1))
+            layers.append(nn.BatchNorm2d(planes))
+            layers.append(nn.ReLU(inplace=True))
+            in_planes = planes
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.down(x)
+        x = self.up(x)
+        return self.final_layer(x)
+
 
 
 if '__main__' == __name__:
-    m = Resnet()
+    m = HourglassNet()
+    import IPython; IPython.embed(); exit()

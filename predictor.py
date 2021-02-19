@@ -8,46 +8,41 @@ from .util import *
 from .draw import *
 
 class BlockCornerCoordPredictor():
-    def __init__(self, model_path, window_expand=2, down_sample=4, pixel_size=10,
-            equalize=None, morphology=False, device='cuda:1'):
-        self.dataset = BlockCornerCoordDataset(window_expand, down_sample, equalize, morphology, pixel_size)
-        self.window_expand = window_expand
-        self.down_sample = down_sample
-        self.pixel_size = pixel_size
-        self.equalize = equalize
-        self.morphology = morphology
+    def __init__(self, model, dataset, device='cuda:0'):
+        self.dataset = dataset
+        self.model = model
         self.device = device
-        self.model = torch.load(model_path, map_location=device).eval()
-        print('model loaded')
+        self.model.eval()
 
-    def predict(self, img_path, gal, finetune=False, spot_radius=5):
+    def predict(self, img_path, gal, gpr, finetune=False, to_spot_coords=True, spot_radius=5):
         '''
         pedict 3 xy coords of all blocks in an image
         return:
             ypreds: coords respective to window coords
             idxs: (img_path, block_no, channel)
         '''
-        gal = Gal(gal) if type(gal) == str else gal
-        xs, idxs = self.dataset.img2x(img_path, gal)
+        idxs, xs, coords, scales = self.dataset.img2x(img_path, gal)
 
         with torch.no_grad():
             xs = torch.tensor(xs).float().to(self.device)
             ypreds = self.model(xs).cpu().numpy()
 
-        idxs = pd.MultiIndex.from_tuples(idxs).set_names(['img_path', 'block'])
+        idxs = pd.MultiIndex.from_tuples(idxs).set_names(['img_path', 'Block'])
         cols = ['x1', 'y1', 'x2', 'y2', 'x3', 'y3']
-        coord_df = pd.DataFrame(ypreds, index=idxs, columns=cols) * self.down_sample
+        coord_df = pd.DataFrame(ypreds, index=idxs, columns=cols)
 
         # add window offset back to original coords
-        for (img_path, b), block_coord_df in coord_df.groupby(['img_path', 'block']):
-            w_start, w_end = get_window_coords(b, gal, self.window_expand, pixel_size=self.pixel_size)
-            coord_df.loc[block_coord_df.index, ['x1', 'x2', 'x3']] = block_coord_df[['x1', 'x2', 'x3']] + w_start[0]
-            coord_df.loc[block_coord_df.index, ['y1', 'y2', 'y3']] = block_coord_df[['y1', 'y2', 'y3']] + w_start[1]
+        for (img_path, b), block_coord_df in coord_df.groupby(['img_path', 'Block']):
+            w_start, w_end = get_window_coords(
+                gal, b, expand=self.dataset.window_expand, pixel_size=self.dataset.pixel_size)
+            coord_df.loc[block_coord_df.index, ['x1', 'x2', 'x3']] = block_coord_df[['x1', 'x2', 'x3']] / scales[b] + w_start[0]
+            coord_df.loc[block_coord_df.index, ['y1', 'y2', 'y3']] = block_coord_df[['y1', 'y2', 'y3']] / scales[b] + w_start[1]
 
         if finetune:
             return self.finetune_spot_coords(coord_df, gal, img_path, spot_radius)
-        else:
+        if to_spot_coords:
             return self.to_spot_coords(coord_df, gal)
+        return coord_df
 
     def finetune_spot_coords(self, coord_df, gal, img_path, spot_radius):
         img = cv2.imread(img_path, 0)
@@ -134,7 +129,7 @@ class BlockCornerCoordPredictor():
                     spot_coord = top_left_spot + ((r-1) * cstep) + ((c-1) * rstep)
                     idxs.append((img_path, b, c, r))
                     coords.append(spot_coord)
-        idxs = pd.MultiIndex.from_tuples(idxs).set_names(['img_path', 'block', 'col', 'row'])
+        idxs = pd.MultiIndex.from_tuples(idxs).set_names(['img_path', 'Block', 'Column', 'Row'])
         return pd.DataFrame(coords, index=idxs, columns=['x', 'y'])
 
 class OldSchoolCoordPredictor():
