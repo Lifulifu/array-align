@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 import cv2
 import os
 from tqdm import tqdm
@@ -9,7 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from .model import Resnet
 from .draw import *
-from .dataset import BlockCornerCoordDataset
+from .dataset import XYbDataset
 from .util import *
 
 def train_block_corner_coord_model(model, dataset, trdl, vadl, augment=0, bsa_args=None, epochs=100, start_epoch=1,
@@ -21,7 +22,8 @@ def train_block_corner_coord_model(model, dataset, trdl, vadl, augment=0, bsa_ar
     loss_func = nn.SmoothL1Loss(reduction='mean')
     # optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=1e-3, max_lr=1e-2, cycle_momentum=False)
+    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=1e-3, max_lr=1e-2,
+        cycle_momentum=False, step_size_up=100, step_size_down=100)
 
     # log file header
     if start_epoch <= 1:
@@ -29,7 +31,7 @@ def train_block_corner_coord_model(model, dataset, trdl, vadl, augment=0, bsa_ar
                 os.path.join(output_dir, 'training_log.txt'), mode='w')
     writer = SummaryWriter(log_dir=os.path.join(output_dir, 'logs/'))
 
-    for epoch in range(start_epoch, start_epoch+epochs+1):
+    for epoch in range(start_epoch, start_epoch+epochs):
         print(f'\nepoch {epoch}')
 
         # ---------train---------
@@ -108,16 +110,16 @@ def train_block_corner_coord_model(model, dataset, trdl, vadl, augment=0, bsa_ar
     writer.flush()
 
 
-def finetune_block_corner_coord_model(model, dataset, trdl, augment=0, epochs=100, start_epoch=1,
-        batch_size=None, save_interval=5, output_dir='outputs/', device='cuda:0'):
+def finetune_block_corner_coord_model(model, xs, ys, epochs=100, start_epoch=1,
+        batch_size=None, save_interval=0, output_dir='outputs/', device='cuda:0'):
 
     os.makedirs(os.path.join(output_dir, 'models'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'preds'), exist_ok=True)
 
     loss_func = nn.SmoothL1Loss(reduction='mean')
-    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=1e-3, max_lr=1e-2, cycle_momentum=False)
+    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=1e-3, max_lr=1e-2,
+        cycle_momentum=False, step_size_up=100, step_size_down=100)
 
     # log file header
     if start_epoch <= 1:
@@ -125,20 +127,17 @@ def finetune_block_corner_coord_model(model, dataset, trdl, augment=0, epochs=10
                 os.path.join(output_dir, 'training_log.txt'), mode='w')
     writer = SummaryWriter(log_dir=os.path.join(output_dir, 'logs/'))
 
+    dl = DataLoader(XYbDataset(xs, ys), batch_size=batch_size, shuffle=True)
     for epoch in range(start_epoch, start_epoch+epochs+1):
         print(f'\nepoch {epoch}')
 
         # ---------train---------
         model.train()
-        trdl_bar = tqdm(trdl, ncols=100)
+        trdl_bar = tqdm(dl, ncols=100)
         tr_losses, xbs, ybs, ypredbs = [], [], [], []
-        for ims, gals, gprs in trdl_bar:
-            xb, yb = dataset.imgs2xy(ims, gals, gprs, augment=augment, bsa_args=bsa_args)
+        for xb, yb in trdl_bar:
             if xb is None:
                 print("empty batch"); continue
-            if batch_size:
-                idx = np.random.randint(low=0, high=len(xb), size=batch_size)
-                xb, yb = xb[idx], yb[idx]
             xb, yb = torch.tensor(xb).float().to(device), torch.tensor(yb).float().to(device)
             ypredb = model(xb)
             loss = loss_func(ypredb, yb)
@@ -162,13 +161,13 @@ def finetune_block_corner_coord_model(model, dataset, trdl, augment=0, epochs=10
             path = os.path.join(output_dir, f'preds/e{epoch}/tr')
             os.makedirs(path, exist_ok=True)
             write_corners_xybs(xbs, ybs, ypredbs, output_dir=path, n_samples=5)
+            torch.save(model, os.path.join(output_dir, f'models/{epoch}.pt'))
 
         tr_loss_mean = np.array(tr_losses).mean()
-        va_loss_mean = np.array(va_losses).mean()
-        print(f'tr loss: {tr_loss_mean}; va loss: {va_loss_mean}')
         lr = optimizer.param_groups[0]['lr']
         print(f'lr: {lr}')
-        write_file(f'{epoch},{tr_loss_mean},{va_loss_mean}',
+        print(f'tr loss: {tr_loss_mean}')
+        write_file(f'{epoch},{tr_loss_mean}',
             os.path.join(output_dir, 'training_log.txt'), mode='a')
     writer.flush()
 
