@@ -380,42 +380,53 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
 
 class MetaBlockCornerCoordDataset(ArrayBlockDataset):
     def __init__(self, window_resize=None, window_expand=2, equalize=False, morphology=False, pixel_size=10,
-                 dataset_choices=[], bsa_choices=[], scale_choices=[], brightness_choices=[]):
+                 dataset_choices=None, row_inc_choices=None, col_inc_choices=None, scale_choices=None, brightness_choices=None):
         super().__init__(window_resize=window_resize, window_expand=window_expand,
                          equalize=equalize, morphology=morphology, pixel_size=pixel_size)
         self.dataset_choices = dataset_choices  # (img_dir, gal_path)
-        self.bsa_choices = bsa_choices  # (row_inc, col_inc)
+        self.row_inc_choices = row_inc_choices  # number
+        self.col_inc_choices = col_inc_choices
         self.scale_choices = scale_choices  # number
         self.brightness_choices = brightness_choices  # number
 
         self.cache = dict()  # saved img2x
 
-    def get_task(self, tr_size, te_size=None):
-        img_dir, gal_path = np.random.choice(self.dataset_choices)
+    def get_task(self, tr_size, te_size=None, from_n_imgs=None):
+        img_dir, gal_path = self.dataset_choices[np.random.choice(
+            len(self.dataset_choices))]
+        row_inc = np.random.choice(
+            self.row_inc_choices) if self.row_inc_choices is not None else 0
+        col_inc = np.random.choice(
+            self.col_inc_choices) if self.col_inc_choices is not None else 0
+        scale = np.random.choice(
+            self.scale_choices) if self.scale_choices is not None else 1
+        brightness = np.random.choice(
+            self.brightness_choices) if self.brightness_choices is not None else 1
+
         img_paths, gal_paths, gpr_paths = self.get_img_gal_gpr_pairs(
             img_dir, gal_path)
-        row_inc, col_inc = np.random.choice(self.bsa_choices)
-        scale = np.random.choice(self.scale_choices)
-        brightness = np.random.choice(self.brightness_choices)
+        if from_n_imgs is not None:
+            idxs = np.random.randint(0, len(img_paths), size=from_n_imgs).astype(int)
+            img_paths, gal_paths, gpr_paths = np.array(
+                img_paths)[idxs], np.array(gal_paths)[idxs], np.array(gpr_paths)[idxs]
         args = {
-            'dataset': (img_dir, gal_path),
-            'bsa': (row_inc, col_inc),
-            'scale': scale,
-            'brightness': brightness}
-
-        while True:
-            xs, ys = self.imgs2xy(
-                img_paths, gal_paths, gpr_paths, row_inc, col_inc, scale, brightness)
-            if xs is not None:
-                break
-            print('get task failed.', args)
+            'dataset': [img_dir, gal_path],
+            'img_paths': list(img_paths),
+            'bsa': [int(row_inc), int(col_inc)],
+            'scale': float(scale),
+            'brightness': float(brightness)}
+        xs, ys = self.imgs2xy(
+            img_paths, gal_paths, gpr_paths, row_inc, col_inc, scale, brightness)
+        if xs is None:
+            return None, args
         te_size = len(xs) - tr_size if te_size == None else te_size
-        idxs = np.random.shuffle(np.arange(len(xs)))
+        idxs = [i for i in range(len(xs))]
+        np.random.shuffle(idxs)  # inplace
         xs, ys = xs[idxs], ys[idxs]  # shuffle
         xtr, xte = xs[:tr_size], xs[tr_size: tr_size+te_size]
         ytr, yte = ys[:tr_size], ys[tr_size: tr_size+te_size]
 
-        return xtr, xte, ytr, yte, args
+        return (xtr, xte, ytr, yte), args
 
     def img2xy(self, img_path, gal_path, gpr_path,
                row_inc=0, col_inc=0, scale=1, brightness=1):
@@ -428,6 +439,7 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
                 img_path, gal, Gpr(gpr_path))  # imgs: (N, 1, h, w)
             self.cache[img_path] = idxs, imgs, df, scales
         if (imgs is None) or (df is None):
+            print(f'{img_path} failed.')
             return None, None
 
         h, w = imgs.shape[2], imgs.shape[3]
@@ -452,20 +464,23 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
                 img[0], kpts.to_xy_array(), row_inc, col_inc)
 
             # scale
+            img = (img * 255).astype('uint8')
             aug_func = aug.Affine(scale=scale)
-            img, kpts = aug_func(img, keypoints=kpts)
+            img, kpts = aug_func(image=img, keypoints=kpts)
 
             # brightness
             aug_func = aug.Multiply(brightness)
-            img, kpts = aug_func(img, keypoints=kpts)
+            img, kpts = aug_func(image=img, keypoints=kpts)
 
             coord = self.to_Lcoord(kpts.to_xy_array())  # (3, 2)
             if self.check_out_of_bounds(img.shape, coord):
-                return None, None
-            xs.append(img)
-            ys.append(coord)
+                continue
+            xs.append(np.array([img]).astype(np.float32))
+            ys.append(coord.flatten())
 
-        return np.stack(xs), np.stack(ys)
+        if len(xs) <= 0:
+            return None, None
+        return np.stack(xs)/255, np.stack(ys)
 
     def imgs2xy(self, img_paths, gal_paths, gpr_paths,
                 row_inc=0, col_inc=0, scale=1, brightness=1):
@@ -481,7 +496,8 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
             if (x is not None) and (y is not None):
                 xs.append(x)
                 ys.append(y)
-        # pass if all cropped images are of same shape
+        if len(xs) <= 0:
+            return None, None
         return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
 
     def get_img_gal_gpr_pairs(self, folder, gal):
@@ -493,6 +509,17 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
                 gpr_paths.append(f.replace('.tif', '.gpr'))
                 gal_paths.append(gal)
         return img_paths, gal_paths, gpr_paths
+
+    def to_Lcoord(self, coord):
+        '''
+        coord: (4, 2) not sorted -> (3, 2) sorted L coord
+        '''
+        coord = coord[np.argsort(coord[:, 0])]  # sort by x
+        # left 2 points sort by y
+        coord[:2] = coord[:2][np.argsort(coord[:2][:, 1])]
+        # right 2 points sort by y
+        coord[2:] = coord[2:][np.argsort(coord[2:][:, 1])]
+        return coord[[0, 1, 3]]  # top left, bottom left, bottom right
 
 
 class BlockCornerHeatmapDataset(ArrayBlockDataset):
