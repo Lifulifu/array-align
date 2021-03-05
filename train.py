@@ -13,7 +13,7 @@ from .draw import *
 from .dataset import XYbDataset
 from .util import *
 
-def train_block_corner_coord_model(model, dataset, trdl, vadl, augment=0, bsa_args=None, epochs=100, start_epoch=1,
+def train_block_corner_coord_model(model, xtr, ytr, xva, yva, epochs=100, start_epoch=1,
         batch_size=None, save_interval=5, output_dir='outputs/', device='cuda:0'):
 
     os.makedirs(os.path.join(output_dir, 'models'), exist_ok=True)
@@ -30,6 +30,8 @@ def train_block_corner_coord_model(model, dataset, trdl, vadl, augment=0, bsa_ar
         write_file('epoch,tr_loss,va_loss',
                 os.path.join(output_dir, 'training_log.txt'), mode='w')
     writer = SummaryWriter(log_dir=os.path.join(output_dir, 'logs/'))
+    trdl = DataLoader(XYbDataset(xtr, ytr), batch_size=batch_size, shuffle=True)
+    vadl = DataLoader(XYbDataset(xva, yva), batch_size=batch_size, shuffle=True)
 
     for epoch in range(start_epoch, start_epoch+epochs):
         print(f'\nepoch {epoch}')
@@ -38,13 +40,7 @@ def train_block_corner_coord_model(model, dataset, trdl, vadl, augment=0, bsa_ar
         model.train()
         trdl_bar = tqdm(trdl, ncols=100)
         tr_losses, xbs, ybs, ypredbs = [], [], [], []
-        for ims, gals, gprs in trdl_bar:
-            xb, yb = dataset.imgs2xy(ims, gals, gprs, augment=augment, bsa_args=bsa_args)
-            if xb is None:
-                print("empty batch"); continue
-            if batch_size:
-                idx = np.random.randint(low=0, high=len(xb), size=batch_size)
-                xb, yb = xb[idx], yb[idx]
+        for xb, yb in trdl_bar:
             xb, yb = torch.tensor(xb).float().to(device), torch.tensor(yb).float().to(device)
             ypredb = model(xb)
             loss = loss_func(ypredb, yb)
@@ -55,7 +51,7 @@ def train_block_corner_coord_model(model, dataset, trdl, vadl, augment=0, bsa_ar
             tr_loss = loss.item()
             tr_losses.append(tr_loss)
             trdl_bar.set_description(f'tr loss: {tr_loss:.3f}')
-            writer.add_scalars("loss", {'tr': tr_loss} , epoch)
+            writer.add_scalars('loss', {'tr': tr_loss} , epoch)
 
             with torch.no_grad():
                 xbs.append(xb.cpu().numpy())
@@ -74,14 +70,7 @@ def train_block_corner_coord_model(model, dataset, trdl, vadl, augment=0, bsa_ar
         vadl_bar = tqdm(vadl, ncols=100)
         va_losses, xbs, ybs, ypredbs = [], [], [], []
         with torch.no_grad():
-            for b, (ims, gals, gprs) in enumerate(vadl_bar):
-                xb, yb = dataset.imgs2xy(ims, gals, gprs, augment=0)  # No aug in va
-                if xb is None:
-                    print("empty batch")
-                    continue
-                if batch_size:
-                    idx = np.random.randint(low=0, high=len(xb), size=batch_size)
-                    xb, yb = xb[idx], yb[idx]
+            for xb, yb in vadl_bar:
                 xb, yb = torch.tensor(xb).float().to(device), torch.tensor(yb).float().to(device)
                 ypredb = model(xb)
                 loss = loss_func(ypredb, yb)

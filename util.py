@@ -4,6 +4,7 @@ import re
 import json
 import cv2
 from shapely.geometry import Polygon
+import os
 
 import torch
 from torch.utils.data.dataset import Dataset
@@ -221,30 +222,56 @@ def write_file(data, path, mode='w'):
                     row = [str(item) for item in row]
                     f.write(','.join(row) + '\n')
                 else:
-                    f.write(row + '\n')
+                    f.write(str(row) + '\n')
         else:
-            f.write(data + '\n')
+            f.write(str(data) + '\n')
 
 
-def eval_gridding(dataset, gpr, pred_df, gal=None, mode='spot', tolerance=.5,
-        gpr_coords=['X', 'Y'], pred_coords=['x', 'y']):
+def eval_gridding(gpr, pred, gal=None, mode='spot', tolerance=.5,
+        gpr_coords=['X', 'Y'], pred_coords=['x', 'y'], pixel_size=10):
     '''
-    * assume gpr_coords != pred_coords or pandas will rename them
-
     pred_df: block corner coord or spot coord
     mode: 'spot' or 'block'
     tolerance: for acc calculation
                False spot if distance > tolerance * min(row margin, col margin)
     '''
+    for i, (gpr_coord, pred_coord) in enumerate(zip(gpr_coords, pred_coords)):
+        if gpr_coord == pred_coord:
+            pred = pred.rename(columns={pred_coord: pred_coord+'_'})
+            pred_coords[i] = pred_coord+'_'
     if gal is None:
         gal = make_fake_gal(gpr)
-    thres = tolerance * min(gal.header['Block1'][Gal.COL_MARGIN], gal.header['Block1'][Gal.ROW_MARGIN]) // dataset.pixel_size
-    df = pd.merge(gpr.data, pred_df, on=['Block', 'Row', 'Column'], how='left')
-    gt, pred = df[gpr_coords].values // dataset.pixel_size, df[pred_coords].values
+    thres = tolerance * min(gal.header['Block1'][Gal.COL_MARGIN], gal.header['Block1'][Gal.ROW_MARGIN]) // pixel_size
+    df = pd.merge(gpr.data, pred, on=['Block', 'Row', 'Column'], how='left')
+    gt, pred = df[gpr_coords].values // pixel_size, df[pred_coords].values
     dist = np.sqrt(((gt - pred) ** 2).sum(axis=1))  # sqrt((x - x')**2 + (y - y')**2)
     hits = dist <= thres
     return dist, hits
 
+
+def data_split(x, y, tr_size, va_size=None, shuffle=True, output_dir=None):
+    '''
+    tr te split and save idxs to output_dir
+    '''
+    idxs = list(range(len(x)))
+    if shuffle:
+        np.random.shuffle(idxs)
+    tr_size = int(len(x) * tr_size)
+    tr_idx = idxs[:tr_size]
+    if va_size is not None:
+        va_size = int(len(x) * va_size)
+        va_idx = idxs[tr_size : tr_size+va_size]
+        te_idx = idxs[tr_size+va_size:]
+    else:
+        va_idx = idxs[tr_size:]
+    if output_dir:
+        write_file(tr_idx, os.path.join(output_dir, 'tr.csv'))
+        write_file(va_idx, os.path.join(output_dir, 'va.csv'))
+        if va_size is not None:
+            write_file(te_idx, os.path.join(output_dir, 'te.csv'))
+    if va_size is not None:
+        return x[tr_idx], x[va_idx], x[te_idx], y[tr_idx], y[va_idx], y[te_idx]
+    return x[tr_idx], x[va_idx], y[tr_idx], y[va_idx]
 
 
 if __name__ == '__main__':
