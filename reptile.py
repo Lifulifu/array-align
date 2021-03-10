@@ -43,7 +43,7 @@ def train_task(model, xtr, xte, ytr, yte, lr=1e-3, epochs=10, device='cuda:0'):
 
 
 def meta_train(model, data_dir, meta_start_epoch=1, meta_epochs=1000, meta_tr_size=800, meta_lr=1e-3,
-               task_epochs=10, task_tr_size=5, task_te_size=32, task_te_epochs=100, task_lr=1e-3,
+               task_epochs=10, task_tr_size=5, task_te_size=None, task_te_epochs=100, task_lr=1e-3,
                imgs_per_task=None, save_interval=5, output_dir='outputs/', device='cuda:0'):
 
     model.to(device)
@@ -54,7 +54,8 @@ def meta_train(model, data_dir, meta_start_epoch=1, meta_epochs=1000, meta_tr_si
     write_file(tr_tasks, os.path.join(output_dir, 'tr.txt'))
     write_file(te_tasks, os.path.join(output_dir, 'te.txt'))
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=meta_lr)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=meta_lr)
+    optimizer = torch.optim.SGD(model.parameters(), lr=meta_lr)
 
     # log file header
     if meta_start_epoch <= 1:
@@ -69,8 +70,18 @@ def meta_train(model, data_dir, meta_start_epoch=1, meta_epochs=1000, meta_tr_si
         # Sample task
         task = os.path.join(data_dir, np.random.choice(tr_tasks))
         x, y = np.load(os.path.join(task, 'x.npy')), np.load(os.path.join(task, 'y.npy'))
-        xtr, xte, ytr, yte = x[
-            :task_tr_size], x[task_tr_size:], y[:task_tr_size], y[task_tr_size:]
+        if len(x) < task_tr_size + task_te_size:
+            continue
+        print(x.shape, y.shape)
+        # shuffle
+        idx = list(range(len(x)))
+        np.random.shuffle(idx)
+        x, y = x[idx], y[idx]
+
+        xtr = x[:task_tr_size]
+        xte = x[task_tr_size : task_tr_size+task_te_size] if task_te_size else x[task_tr_size:]
+        ytr = y[:task_tr_size]
+        yte = y[task_tr_size : task_tr_size+task_te_size] if task_te_size else y[task_tr_size:]
         new_model, meta_tr_loss, ypred = train_task(
             model, xtr, xte, ytr, yte, epochs=task_epochs, lr=task_lr, device=device)
 
@@ -89,14 +100,23 @@ def meta_train(model, data_dir, meta_start_epoch=1, meta_epochs=1000, meta_tr_si
             os.makedirs(path, exist_ok=True)
             write_file(task, os.path.join(path, 'task.txt'))
             write_corners_xybs([xte], [yte], [ypred],
-                               output_dir=path, n_samples=10)
+                            output_dir=path, n_samples=10)
 
         # --- Validate ---
         model.eval()
         task = os.path.join(data_dir, np.random.choice(te_tasks))
         x, y = np.load(os.path.join(task, 'x.npy')), np.load(os.path.join(task, 'y.npy'))
-        xtr, xte, ytr, yte = x[
-            :task_tr_size], x[task_tr_size:], y[:task_tr_size], y[task_tr_size:]
+        if len(x) < task_tr_size + task_te_size:
+            continue
+        # shuffle
+        idx = list(range(len(x)))
+        np.random.shuffle(idx)
+        x, y = x[idx], y[idx]
+
+        xtr = x[:task_tr_size]
+        xte = x[task_tr_size : task_tr_size+task_te_size] if task_te_size else x[task_tr_size:]
+        ytr = y[:task_tr_size]
+        yte = y[task_tr_size : task_tr_size+task_te_size] if task_te_size else y[task_tr_size:]
 
         _, meta_va_loss, ypred = train_task(
             model, xtr, xte, ytr, yte, epochs=task_te_epochs)
@@ -110,7 +130,7 @@ def meta_train(model, data_dir, meta_start_epoch=1, meta_epochs=1000, meta_tr_si
             path = os.path.join(output_dir, f'preds/e{epoch}/va/')
             os.makedirs(path, exist_ok=True)
             write_corners_xybs([xte], [yte], [ypred],
-                               output_dir=path, n_samples=10)
+                            output_dir=path, n_samples=10)
             write_file(task, os.path.join(path, f'task.txt'))
             torch.save(model, os.path.join(output_dir, f'models/{epoch}.pt'))
 

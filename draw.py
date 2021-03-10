@@ -23,7 +23,7 @@ def to_color(grayscale, channel, alpha=False):  # {{{
     rgb[:, :, channel] = grayscale
     return rgb
 
-def x2rgbimg(x, alpha=False):
+def x2rgbimg(x, alpha=False, eq=False):
     '''
     x is assumed to be [0~1] numpy array of shape (h, w) or (1, h, w)
     '''
@@ -31,17 +31,19 @@ def x2rgbimg(x, alpha=False):
         assert x.shape[0] == 1
         x = x[0] # from (1, h, w) to (h, w)
     x = (x * 255).astype(np.uint8)
+    if eq:
+        x = im_equalize(x, method='clahe')
     if alpha:
         return cv2.cvtColor(x, cv2.COLOR_GRAY2RGBA)
     return cv2.cvtColor(x, cv2.COLOR_GRAY2RGB)
 
-def write_corners_xybs(xbs, ybs, ypredbs, output_dir, n_samples=None):
+def write_corners_xybs(xbs, ybs, ypredbs, output_dir, n_samples=None, eq=False):
     os.makedirs(output_dir, exist_ok=True)
     for batch, (xb, yb, ypredb) in enumerate(zip(xbs, ybs, ypredbs)):
         if n_samples:
             xb, yb, ypredb = xb[:n_samples], yb[:n_samples], ypredb[:n_samples]
         for i, (x, y, ypred) in enumerate(zip(xb, yb, ypredb)):
-            im = x2rgbimg(x)
+            im = x2rgbimg(x, eq=eq)
             y = y.reshape((-1, 2)).astype('int32')
             ypred = ypred.reshape((-1, 2)).astype('int32')
             im = draw_parallelogram(im, y, color=(0, 255, 0), thickness=1)

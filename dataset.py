@@ -46,12 +46,18 @@ class XYbDataset(Dataset):
 
 
 class BlockSizeAugmentor():
-    def __init__(self, block_size):
+    def __init__(self, block_size, cut_pp=None):
         '''
         args:
             block_size: original (n_rows, n_cols)
+            cut_pp: ((l_cut_pp, r_cut_pp), (b_cut_pp, t_cut_pp))
         '''
         self.n_rows, self.n_cols = block_size
+        # cut pp will be constant after the first augmentation
+        if cut_pp is None:
+            self.row_cut_pp, self.col_cut_pp = None, None
+        else:
+            self.row_cut_pp, self.col_cut_pp = cut_pp
 
     def make_cut_mask(self, img_shape, pts):
         # 2 pts [x, y] = [y, x] on img
@@ -77,8 +83,10 @@ class BlockSizeAugmentor():
         h_step_vec = h_vec / (self.n_rows - 1)
         invalid_len = h_step_vec * abs(inc)
         valid_len = h_vec - 2*invalid_len
-        l_cut_coord = corners[0] + invalid_len + np.random.rand() * valid_len
-        r_cut_coord = corners[3] + invalid_len + np.random.rand() * valid_len
+        if self.row_cut_pp is None:
+            self.row_cut_pp = (np.random.rand(), np.random.rand())
+        l_cut_coord = corners[0] + invalid_len + self.row_cut_pp[0] * valid_len
+        r_cut_coord = corners[3] + invalid_len + self.row_cut_pp[1] * valid_len
         shift = h_step_vec * inc
         # left to right so that the moving part (bottom) of the mask is 1
         img_aug = self.cut_move_paste(img, (l_cut_coord, r_cut_coord), shift)
@@ -92,8 +100,10 @@ class BlockSizeAugmentor():
         w_step_vec = w_vec / (self.n_cols - 1)
         invalid_len = w_step_vec * abs(inc)
         valid_len = w_vec - 2*invalid_len
-        t_cut_coord = corners[0] + invalid_len + np.random.rand() * valid_len
-        b_cut_coord = corners[1] + invalid_len + np.random.rand() * valid_len
+        if self.col_cut_pp is None:
+            self.col_cut_pp = (np.random.rand(), np.random.rand())
+        t_cut_coord = corners[0] + invalid_len + self.col_cut_pp[0] * valid_len
+        b_cut_coord = corners[1] + invalid_len + self.col_cut_pp[1] * valid_len
         shift = w_step_vec * inc
         # bottom to top so that the moving part (right side) of the mask is 1
         img_aug = self.cut_move_paste(img, (b_cut_coord, t_cut_coord), shift)
@@ -109,7 +119,7 @@ class BlockSizeAugmentor():
             aug_img
             coords: corner coords (4, 2)
         '''
-        img_aug, corners_aug, row_cut_coords = self.augment_row(
+        img_aug, corners_aug,  row_cut_coords = self.augment_row(
             img, corners, row_inc)
         img_aug, corners_aug, col_cut_coords = self.augment_col(
             img_aug, corners_aug, col_inc)
@@ -244,8 +254,8 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
         super().__init__(window_resize=window_resize, window_expand=window_expand,
                          equalize=equalize, morphology=morphology, pixel_size=pixel_size)
         self.aug_seq = aug.Sequential([
-            # aug.HorizontalFlip(0.5),
-            # aug.VerticalFlip(0.5),
+            aug.HorizontalFlip(0.5),
+            aug.VerticalFlip(0.5),
             aug.Sometimes(0.5, aug.GaussianBlur(sigma=(0, 0.2))),
             aug.LinearContrast((0.8, 1.2)),
             aug.AdditiveGaussianNoise(scale=(0.0, 0.05*255)),
@@ -253,7 +263,9 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
             aug.Affine(
                 translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)},
                 rotate=(-5, 5),
+                scale=(.9, 1.1)
             )], random_order=True)
+        self.cache = dict()
 
     def img2xy(self, img_path, gal_path, gpr_path, augment=0,
                bsa_args: dict = None, blocks=None, keep_ori=True):
@@ -274,6 +286,7 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
             idx:
                 (img_path, block) for one x sample
         '''
+
         gal = make_fake_gal(Gpr(gpr_path)) if gal_path == '' else Gal(gal_path)
         idxs, imgs, df, scales = super().img2x(
             img_path, gal, Gpr(gpr_path))  # imgs: (N, 1, h, w)
@@ -384,24 +397,24 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
 
 class MetaBlockCornerCoordDataset(ArrayBlockDataset):
     def __init__(self, window_resize=None, window_expand=2, equalize=False, morphology=False, pixel_size=10,
-                 dataset_choices:dict=None, row_inc_choices=None, col_inc_choices=None, scale_choices=None, brightness_choices=None):
+                 dataset_choices:dict=None, row_inc_choices=None, col_inc_choices=None, scale_choices=None,
+                 h_flip=None, v_flip=None, blur_choices=None, noise_choices=None):
         super().__init__(window_resize=window_resize, window_expand=window_expand,
                          equalize=equalize, morphology=morphology, pixel_size=pixel_size)
         self.dataset_choices = dataset_choices  # {dataset_name: ([img_dir], [gal_path])}
         self.row_inc_choices = row_inc_choices  # number
         self.col_inc_choices = col_inc_choices
         self.scale_choices = scale_choices  # number
-        self.brightness_choices = brightness_choices  # number
+        self.h_flip = h_flip
+        self.v_flip = v_flip
+        self.blur_choices = blur_choices
+        self.noise_choices = noise_choices
 
         self.aug_seq = aug.Sequential([
-            aug.Sometimes(0.5, aug.GaussianBlur(sigma=(0, 0.2))),
-            aug.LinearContrast((0.8, 1.2)),
-            aug.AdditiveGaussianNoise(scale=(0.0, 0.05*255)),
-            aug.Multiply((0.5, 1.0)),
             aug.Affine(
                 translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)},
                 rotate=(-5, 5),
-            )], random_order=True)
+            )])
 
         self.img_cache = dict()  # saved img2x
         self.gal_cache = dict()  # saved gals, key=dataset name
@@ -413,6 +426,14 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
             self.row_inc_choices) if self.row_inc_choices is not None else 0
         col_inc = np.random.choice(
             self.col_inc_choices) if self.col_inc_choices is not None else 0
+        scale = np.random.choice(
+            self.scale_choices) if self.col_inc_choices is not None else 0
+        blur = np.random.choice(
+            self.blur_choices) if self.blur_choices is not None else 0
+        noise = np.random.choice(
+            self.noise_choices) if self.noise_choices is not None else 0
+        h_flip = True if self.h_flip and (np.random.rand() < self.h_flip) else False
+        v_flip = True if self.v_flip and (np.random.rand() < self.v_flip) else False
 
         data = self.read_dir_files(img_dir, gal_path)
         if from_n_imgs is not None:
@@ -422,8 +443,15 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
             'dataset': ds_name,
             'gal': gal_path,
             'samples': list(data[:, 0]),
-            'bsa': [int(row_inc), int(col_inc)]}
-        xs, ys = self.imgs2xy(ds_name, data, row_inc, col_inc, augment=augment)
+            'bsa': [int(row_inc), int(col_inc)],
+            'scale': scale,
+            'blur': blur,
+            'noise': noise,
+            'h_flip': h_flip,
+            'v_flip': v_flip,
+        }
+        xs, ys = self.imgs2xy(ds_name, data, row_inc, col_inc, scale, h_flip, v_flip,
+            blur, noise, augment=augment)
         if xs is None:
             return None, args
         idxs = [i for i in range(len(xs))]
@@ -432,7 +460,9 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
 
         return (xs, ys), args
 
-    def img2xy(self, ds_name, img_path, gal_path, gpr_path, row_inc, col_inc, augment):
+    def img2xy(self, ds_name, img_path, gal_path, gpr_path,
+            row_inc, col_inc, scale, h_flip, v_flip, blur, noise,
+            augment=0, cut_pp=None):
 
         if ds_name in self.gal_cache:
             gal = self.gal_cache[ds_name]
@@ -448,7 +478,7 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
             self.img_cache[img_path] = idxs, imgs, df, scales
         if (imgs is None) or (df is None):
             print(f'{img_path} failed.')
-            return None, None
+            return None, None, None
 
         h, w = imgs.shape[2], imgs.shape[3]
         xs, ys = [], []
@@ -467,11 +497,35 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
             ], shape=(h, w))
 
             # bsa
-            bsa = BlockSizeAugmentor((nrows, ncols))
+            bsa = BlockSizeAugmentor((nrows, ncols), cut_pp)
             img, kpts, _ = bsa.augment(
                 img[0], kpts.to_xy_array(), row_inc, col_inc)
-            if self.check_out_of_bounds(img.shape, kpts.to_xy_array()):
+            coord = self.to_Lcoord(kpts.to_xy_array())
+            if self.check_out_of_bounds(img.shape, coord):
                 continue
+
+            img = (img * 255).astype('uint8')
+            # h_flip
+            if h_flip:
+                aug_func = aug.HorizontalFlip(1)
+                img, kpts = aug_func(image=img, keypoints=kpts)
+            # v_flip
+            if v_flip:
+                aug_func = aug.VerticalFlip(1)
+                img, kpts = aug_func(image=img, keypoints=kpts)
+            # scale
+            if scale != 1:
+                aug_func = aug.Affine(scale=scale)
+                img, kpts = aug_func(image=img, keypoints=kpts)
+            # blur
+            if blur != 0:
+                aug_func = aug.GaussianBlur(sigma=blur)
+                img, kpts = aug_func(image=img, keypoints=kpts)
+            # noise
+            if noise != 0:
+                aug_func = aug.AdditiveGaussianNoise(scale=noise)
+                img, kpts = aug_func(image=img, keypoints=kpts)
+            img = img / 255
 
             # augment
             if augment >= 1:
@@ -495,17 +549,19 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
                 xs.append(np.array([img_aug/255]))
                 ys.append(coord.flatten())
 
-            coord = self.to_Lcoord(kpts.to_xy_array())  # (3, 2)
+            coord = self.to_Lcoord(kpts.to_xy_array())
             if self.check_out_of_bounds(img.shape, coord):
                 continue
-            xs.append(np.array([img]).astype(np.float32))
+            xs.append(np.array([img]))
             ys.append(coord.flatten())
 
         if len(xs) <= 0:
-            return None, None
-        return np.stack(xs), np.stack(ys)
+            return None, None, None
+        return np.stack(xs), np.stack(ys), (bsa.row_cut_pp, bsa.col_cut_pp)
 
-    def imgs2xy(self, ds_name, data, row_inc=0, col_inc=0, augment=0):
+    def imgs2xy(self, ds_name, data,
+            row_inc, col_inc, scale, h_flip, v_flip, blur, noise,
+            augment=0, cut_pp=None):
         '''
         List of img files to xy for all blocks
         args: lists of img and gpr paths
@@ -513,8 +569,9 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
         '''
         xs, ys = [], []
         for img_path, gal_path, gpr_path in data:
-            x, y = self.img2xy(
-                ds_name, img_path, gal_path, gpr_path, row_inc, col_inc, augment)
+            x, y, cut_pp = self.img2xy(
+                ds_name, img_path, gal_path, gpr_path,
+                row_inc, col_inc, scale, h_flip, v_flip, blur, noise, augment, cut_pp)
             if (x is not None) and (y is not None):
                 xs.append(x)
                 ys.append(y)
@@ -649,6 +706,25 @@ class BlockCornerHeatmapDataset(ArrayBlockDataset):
         result = np.exp(-0.5 * (np.square(xx-xm) +
                                 np.square(yy-ym)) / np.square(sigma))
         return result / np.max(result)
+
+
+def get_dataset(data_dir, gal, args, save_dir=None):
+    '''
+    data_dir: list of str paths
+    '''
+    dataset = BlockCornerCoordDataset(
+        window_resize=args['window_resize'],
+        window_expand=args['window_expand'],
+        equalize=args['equalize'], morphology=args['morphology'])
+    data = dataset.read_dir_files(data_dir, gal)
+    xs, ys = dataset.imgs2xy(data, augment=args['augment'], keep_ori=True)
+
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        with open(os.path.join(save_dir, 'args.json'), 'w') as f:
+            f.write(json.dumps(args))
+        np.save(os.path.join(save_dir, 'x.npy'), xs)
+        np.save(os.path.join(save_dir, 'y.npy'), ys)
 
 
 def write_datasets():
