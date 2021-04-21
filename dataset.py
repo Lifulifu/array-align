@@ -141,78 +141,87 @@ class BlockSizeAugmentor():
 
 
 class ArrayBlockDataset():
-    def __init__(self, window_resize, window_expand, equalize,
-                 morphology, pixel_size, clahe_kwargs={'clipLimit': 20, 'tileGridSize': (8, 8)}):
+    def __init__(self, window_resize, window_expand, equalize, morphology, channel_mode,
+            pixel_size=10, clahe_kwargs={'clipLimit': 20, 'tileGridSize': (8, 8)}):
         self.window_resize = window_resize
         self.window_expand = window_expand
         self.equalize = equalize
         self.clahe_kwargs = clahe_kwargs
         self.morphology = morphology
+        self.channel_mode = channel_mode
         self.pixel_size = pixel_size
-        # self.block_size_augmentor = BlockSizeAugmentor()
 
     def check_out_of_bounds(self, img_shape, coord):
         h, w = img_shape
-        return (coord[:, 0].max() >= w) or (coord[:, 1].max() >= h) or (coord[:, 0].min() < 0) or (coord[:, 1].min() < 0)
-
-    def block_size_augmentation(img, coord_df):
-        pass
-        # return aug_img, aug_coord_df
+        return (coord[:, 0].max() >= w) or (coord[:, 1].max() >= h) or (
+                coord[:, 0].min() < 0) or (coord[:, 1].min() < 0)
 
     def img2x(self, img_path, gal, gpr=None):
         '''
         Single img file to xs for all blocks and fused channels
-        args:
-            img_info: parsed json file, must contain BlockCoords
 
+        args:
+            channel_mode:
+                'stack': (n, c, h, w)
+                'max': img = img.max(axis=0). (n, 1, h, w)
+                'seperate': each channel is viewed as an individual img. (n*c, 1, h, w)
         returns:
             xs:
-                cropped window, grayscale[0~255]=>[0~1]
+                cropped window, grayscale[0~255]
                 shape ( #blocks, 1, win_shape[0], win_shape[1] )
             coords:
                 list of df, each spot coord in the block
             idxs:
-                (img_path, block) for one x sample
+                (img_path, block, channel) for one x sample
             scales (dict):
                 img scaling for each block
         '''
         ims = read_tif(img_path)
         if ims:
-            im = np.stack(ims).max(axis=0)  # fuse img channels
+            if self.channel_mode == 'max':
+                ims = np.stack(ims).max(axis=0)  # fuse img channels (1, h, w)
+                ims = np.expand_dims(ims, axis=0)
+            elif self.channel_mode in ('stack', 'seperate'):
+                ims = np.stack(ims) # (2, h, w)
+            else:
+                raise Exception('channel mode not recognized.')
         else:
             return None, None, None, None
+        assert len(ims.shape) == 3  # channel, h, w
 
         xs, coords, idxs, scales = [], [], [], dict()
         for b in range(1, gal.header['BlockCount']+1):
-            idxs.append((img_path, b))
             p1, p2 = get_window_coords(
                 gal, b, self.window_expand, pixel_size=self.pixel_size)
-            cropped = crop_window(im, p1, p2).astype('uint8')
-            cropped, scale = im_contain_resize(cropped, self.window_resize)
-            scales[b] = scale
-            if self.equalize:
-                cropped = im_equalize(
-                    cropped, method=self.equalize, clahe_kwargs=self.clahe_kwargs)
-            if self.morphology:
-                cropped = im_morphology(cropped)
-            xs.append(cropped)
+            xs_ = []
+            for channel, im in enumerate(ims):
+                if (self.channel_mode == 'seperate') or (channel == 0):  # if ch_mode == 'max' or 'stack', only append one index for each image
+                    idxs.append((img_path, b, channel))
+                cropped = crop_window(im, p1, p2).astype('uint8')
+                cropped, scale = im_contain_resize(cropped, self.window_resize)
+                scales[b] = scale
+                if self.equalize:
+                    cropped = im_equalize(
+                        cropped, method=self.equalize, clahe_kwargs=self.clahe_kwargs)
+                if self.morphology:
+                    cropped = im_morphology(cropped)
+                xs_.append(cropped)
 
             if gpr is not None:
                 coord_df = (
                     gpr.data.loc[b][['X', 'Y']] / self.pixel_size - np.array(p1)) * scale
-                coords.append(coord_df)
+                if self.channel_mode == 'seperate':
+                    coords.extend([coord_df] * len(ims))  # coord_dfs of all channels should be the same
+                else:  # 'max' or 'stack
+                    coords.append(coord_df)
+            xs.append(np.stack(xs_))  # seperate/stack: (c, h, w), max: (1, h, w)
 
-        xs = np.stack(xs)
-        return idxs, np.expand_dims(xs, axis=1)/255, coords, scales
-
-    def read_dir_files(self, dirs, gal_paths, exclude=[]):
-        results = []
-        for d, g in zip(dirs, gal_paths):
-            for f in os.listdir(d):
-                f = os.path.join(d, f)
-                if f.endswith('.tif') and not (f in exclude):
-                    results.append((f, g, f.replace('.tif', '.gpr')))
-        return results
+        if self.channel_mode == 'seperate':
+            xs = np.concatenate(xs)
+            xs = np.expand_dims(xs, axis=1)  # (c*n, h, w) -> (c*n, 1, h, w)
+        else:
+            xs = np.stack(xs)  # stack: (n, c, h, w), max: (n, 1, h, w)
+        return idxs, xs, coords, scales
 
     def get_dataloaders(self, dirs, gal_paths, te_size=.2, exclude=[], batch_size=1, save_dir=None):
         '''
@@ -250,20 +259,20 @@ class ArrayBlockDataset():
 
 
 class BlockCornerCoordDataset(ArrayBlockDataset):
-    def __init__(self, window_resize=None, window_expand=2, equalize=False, morphology=False, pixel_size=10):
+    def __init__(self, window_resize=None, window_expand=2, equalize=False, morphology=False,
+            channel_mode='max', pixel_size=10):
         super().__init__(window_resize=window_resize, window_expand=window_expand,
-                         equalize=equalize, morphology=morphology, pixel_size=pixel_size)
+            equalize=equalize, morphology=morphology, channel_mode=channel_mode, pixel_size=pixel_size)
         self.aug_seq = aug.Sequential([
-            aug.HorizontalFlip(0.5),
-            aug.VerticalFlip(0.5),
-            aug.Sometimes(0.5, aug.GaussianBlur(sigma=(0, 0.2))),
+            # aug.HorizontalFlip(0.5),
+            # aug.VerticalFlip(0.5),
+            aug.Sometimes(0.2, aug.GaussianBlur(sigma=(0, 0.2))),
             aug.LinearContrast((0.8, 1.2)),
             aug.AdditiveGaussianNoise(scale=(0.0, 0.05*255)),
-            aug.Multiply((0.5, 1.0)),
+            aug.Multiply((0.8, 1.0)),
             aug.Affine(
                 translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)},
                 rotate=(-5, 5),
-                scale=(.9, 1.1)
             )], random_order=True)
         self.cache = dict()
 
@@ -283,18 +292,18 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
                 top left, bottom left, bottom right XYs of a block (L shape)
                 (relative to window coords)
                 shape ( #blocks*2, 6 )
-            idx:
-                (img_path, block) for one x sample
+            is_ori (1D array):
+                True : sample is original data
+                False: sample is augmented
         '''
 
         gal = make_fake_gal(Gpr(gpr_path)) if gal_path == '' else Gal(gal_path)
-        idxs, imgs, df, scales = super().img2x(
-            img_path, gal, Gpr(gpr_path))  # imgs: (N, 1, h, w)
+        idxs, imgs, df, scales = super().img2x(img_path, gal, Gpr(gpr_path))  # imgs: (N, 1, h, w)
         if (imgs is None) or (df is None):
             return None, None
         h, w = imgs.shape[2], imgs.shape[3]
-        xs, ys = [], []
-        for (img_path, b), img, block_df in zip(idxs, imgs, df):
+        xs, ys, is_ori = [], [], []
+        for (img_path, b, c), img, block_df in zip(idxs, imgs, df):
             if (blocks is not None) and not (b in blocks):
                 continue
             nrows = gal.header[f'Block{b}'][Gal.N_ROWS]
@@ -314,7 +323,9 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
                 xs.append(img)
                 coord = self.to_Lcoord(kpts.to_xy_array())
                 ys.append(coord.flatten())
+                is_ori.append(True)
 
+            #! channel_mode not implemented
             if bsa_args is not None:
                 bsa = BlockSizeAugmentor((nrows, ncols))
                 if bsa_args['n'] >= 1:
@@ -332,6 +343,7 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
                         augys.append(coord.flatten())
                     xs.extend(augxs)
                     ys.extend(augys)
+                    is_ori.extend([False]*len(augxs))
                 elif np.random.rand() < bsa_args['n']:
                     row_inc = np.random.choice(bsa_args['row_inc_choice'])
                     col_inc = np.random.choice(bsa_args['col_inc_choice'])
@@ -342,46 +354,64 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
                         continue  # skip if coord out of bounds
                     xs.append(np.array([img_aug]))
                     ys.append(coord.flatten())
+                    is_ori.append(False)
+            #!
 
             if augment >= 1:
                 augxs, augys = [], []
                 while len(augxs) < augment:
-                    img_aug, kpts_aug = self.aug_seq(
-                        image=(img[0]*255).astype('uint8'), keypoints=kpts)  # img: (1, w, h) -> (w, h)
-                    coord = self.to_Lcoord(kpts_aug.to_xy_array())  # (3, 2)
-                    if self.check_out_of_bounds(img_aug.shape, coord):
-                        continue  # skip if coord out of bounds
-                    augxs.append(np.array([img_aug/255]))
+                    img_aug, coord = self.run_aug(img, kpts)
+                    if img_aug is None: continue
+                    augxs.append(img_aug)
                     augys.append(coord.flatten())
                 xs.extend(augxs)
                 ys.extend(augys)
+                is_ori.extend([False]*len(augxs))
             elif np.random.rand() < augment:
-                img_aug, kpts_aug = self.aug_seq(
-                    image=(img[0]*255).astype('uint8'), keypoints=kpts)  # img: (1, w, h) -> (w, h)
-                coord = self.to_Lcoord(kpts_aug.to_xy_array())  # (3, 2)
-                if self.check_out_of_bounds(img_aug.shape, coord):
-                    continue  # skip if coord out of bounds
-                xs.append(np.array([img_aug/255]))
+                img_aug, coord = self.run_aug(img, kpts)
+                if img_aug is None: continue
+                xs.append(img_aug)
                 ys.append(coord.flatten())
+                is_ori.append(False)
 
-        return np.stack(xs), np.stack(ys)
+        return np.stack(xs)/255, np.stack(ys), np.array(is_ori)
 
-    def imgs2xy(self, data, augment=0, bsa_args=None, keep_ori=True):
+    def imgs2xy(self, data, augment=0, bsa_args=None, keep_ori=True, shuffle=False):
         '''
         List of img files to xy for all blocks
         data: [(img, gal, gpr), (...)]
         returns: aggregated x, y nparrays
         '''
-        xs, ys = [], []
+        xs, ys, is_oris = [], [], []
         for img_path, gal_path, gpr_path in data:
-            x, y = self.img2xy(
+            x, y, is_ori = self.img2xy(
                 img_path, gal_path, gpr_path, augment, bsa_args, keep_ori=keep_ori)
             if (x is not None) and (y is not None):
                 xs.append(x)
                 ys.append(y)
+                is_oris.append(is_ori)
         # pass if all cropped images are of same shape
-        xs, ys = np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
-        return xs, ys
+        xs, ys, is_oris = np.concatenate(
+            xs, axis=0), np.concatenate(ys, axis=0), np.concatenate(is_oris, axis=0)
+
+        if shuffle:
+            idxs = np.arange(len(xs))
+            np.random.shuffle(idxs)
+            xs, ys, is_oris = xs[idxs], ys[idxs], is_oris[idxs]
+
+        return xs, ys, is_oris
+
+    def run_aug(self, img, kpts):
+        img = np.moveaxis(img, 0, -1).astype('uint8')
+        img_aug, kpts_aug = self.aug_seq(image=img, keypoints=kpts)  # img: (2, w, h) -> (w, h, 2)
+        coord = self.to_Lcoord(kpts_aug.to_xy_array())  # (3, 2)
+        if self.check_out_of_bounds(img_aug.shape[:2], coord):
+            return None, None  # skip if coord out of bounds
+        # take only r and g channels
+        return np.moveaxis(img_aug, -1, 0), coord
+
+    def run_bsa(self, img, kpts):
+        pass
 
     def to_Lcoord(self, coord):
         '''
@@ -397,10 +427,10 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
 
 class MetaBlockCornerCoordDataset(ArrayBlockDataset):
     def __init__(self, window_resize=None, window_expand=2, equalize=False, morphology=False, pixel_size=10,
-                 dataset_choices:dict=None, row_inc_choices=None, col_inc_choices=None, scale_choices=None,
-                 h_flip=None, v_flip=None, blur_choices=None, noise_choices=None):
-        super().__init__(window_resize=window_resize, window_expand=window_expand,
-                         equalize=equalize, morphology=morphology, pixel_size=pixel_size)
+                 channel_mode='max', dataset_choices:dict=None, row_inc_choices=None, col_inc_choices=None,
+                 scale_choices=None, h_flip=None, v_flip=None, blur_choices=None, noise_choices=None):
+        super().__init__(window_resize=window_resize, window_expand=window_expand, equalize=equalize,
+            morphology=morphology, channel_mode=channel_mode, pixel_size=pixel_size)
         self.dataset_choices = dataset_choices  # {dataset_name: ([img_dir], [gal_path])}
         self.row_inc_choices = row_inc_choices  # number
         self.col_inc_choices = col_inc_choices
@@ -421,7 +451,9 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
 
     def get_task(self, from_n_imgs=None, augment=0):
         ds_name = np.random.choice(list(self.dataset_choices.keys()))
-        img_dir, gal_path = self.dataset_choices[ds_name]
+        data = self.dataset_choices[ds_name]
+        if type(data) is str:
+            data = read_file_names_from_csv(data)
         row_inc = np.random.choice(
             self.row_inc_choices) if self.row_inc_choices is not None else 0
         col_inc = np.random.choice(
@@ -435,14 +467,12 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
         h_flip = True if self.h_flip and (np.random.rand() < self.h_flip) else False
         v_flip = True if self.v_flip and (np.random.rand() < self.v_flip) else False
 
-        data = self.read_dir_files(img_dir, gal_path)
         if from_n_imgs is not None:
             idxs = np.random.randint(0, len(data), size=from_n_imgs).astype(int)
-            data = np.array(data)[idxs]
+            data = [data[i] for i in idxs]
         args = {
             'dataset': ds_name,
-            'gal': gal_path,
-            'samples': list(data[:, 0]),
+            'data': data,
             'bsa': [int(row_inc), int(col_inc)],
             'scale': scale,
             'blur': blur,
@@ -457,7 +487,6 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
         idxs = [i for i in range(len(xs))]
         np.random.shuffle(idxs)  # inplace
         xs, ys = xs[idxs], ys[idxs]  # shuffle
-
         return (xs, ys), args
 
     def img2xy(self, ds_name, img_path, gal_path, gpr_path,
@@ -473,16 +502,16 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
         if img_path in self.img_cache:
             idxs, imgs, df, scales = self.img_cache[img_path]
         else:
-            idxs, imgs, df, scales = super().img2x(
+            idxs, imgs, df, scales = self.img2x(
                 img_path, gal, Gpr(gpr_path))  # imgs: (N, 1, h, w)
             self.img_cache[img_path] = idxs, imgs, df, scales
         if (imgs is None) or (df is None):
             print(f'{img_path} failed.')
             return None, None, None
 
-        h, w = imgs.shape[2], imgs.shape[3]
+        h, w = imgs.shape[-2], imgs.shape[-1]
         xs, ys = [], []
-        for (img_path, b), img, block_df in zip(idxs, imgs, df):
+        for (img_path, b, c), img, block_df in zip(idxs, imgs, df):
             nrows = gal.header[f'Block{b}'][Gal.N_ROWS]
             ncols = gal.header[f'Block{b}'][Gal.N_COLS]
             kpts = KeypointsOnImage([
@@ -498,13 +527,17 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
 
             # bsa
             bsa = BlockSizeAugmentor((nrows, ncols), cut_pp)
-            img, kpts, _ = bsa.augment(
-                img[0], kpts.to_xy_array(), row_inc, col_inc)
+            img_ = []
+            kpts_ = kpts.copy()
+            for im in img:
+                im, kpts, _ = bsa.augment(im, kpts_.to_xy_array(), row_inc, col_inc)
+                img_.append(im)
+            img = np.stack(img_).astype('uint8')
             coord = self.to_Lcoord(kpts.to_xy_array())
-            if self.check_out_of_bounds(img.shape, coord):
+            if self.check_out_of_bounds(img.shape[1:], coord):
                 continue
 
-            img = (img * 255).astype('uint8')
+            img = np.moveaxis(img, 0, -1)  # (c, h, w) -> (h, w, c)
             # h_flip
             if h_flip:
                 aug_func = aug.HorizontalFlip(1)
@@ -517,6 +550,8 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
             if scale != 1:
                 aug_func = aug.Affine(scale=scale)
                 img, kpts = aug_func(image=img, keypoints=kpts)
+                if self.check_out_of_bounds(img.shape[:2], kpts.to_xy_array()):
+                    continue
             # blur
             if blur != 0:
                 aug_func = aug.GaussianBlur(sigma=blur)
@@ -525,39 +560,37 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
             if noise != 0:
                 aug_func = aug.AdditiveGaussianNoise(scale=noise)
                 img, kpts = aug_func(image=img, keypoints=kpts)
-            img = img / 255
+            img = np.moveaxis(img, -1, 0)  # (h, w, c) -> (c, h, w)
+
+            coord = self.to_Lcoord(kpts.to_xy_array())
+            if self.check_out_of_bounds(img.shape[1:], coord):
+                continue
+            xs.append(img)
+            ys.append(coord.flatten())
 
             # augment
             if augment >= 1:
-                augxs, augys = [], []
+                augxs, augys, fail_count = [], [], 0
                 while len(augxs) < augment:
-                    img_aug, kpts_aug = self.aug_seq(
-                        image=(img*255).astype('uint8'), keypoints=kpts)  # img: (1, w, h) -> (w, h)
-                    coord = self.to_Lcoord(kpts_aug.to_xy_array())  # (3, 2)
-                    if self.check_out_of_bounds(img_aug.shape, coord):
-                        continue  # skip if coord out of bounds
-                    augxs.append(np.array([img_aug/255]))
+                    img_aug, coord = self.run_aug(img, kpts)
+                    if fail_count > 5:
+                        return None, None, None
+                    if img_aug is None:
+                        fail_count += 1
+                        continue
+                    augxs.append(img_aug)
                     augys.append(coord.flatten())
                 xs.extend(augxs)
                 ys.extend(augys)
             elif np.random.rand() < augment:
-                img_aug, kpts_aug = self.aug_seq(
-                    image=(img*255).astype('uint8'), keypoints=kpts)  # img: (1, w, h) -> (w, h)
-                coord = self.to_Lcoord(kpts_aug.to_xy_array())  # (3, 2)
-                if self.check_out_of_bounds(img_aug.shape, coord):
-                    continue  # skip if coord out of bounds
-                xs.append(np.array([img_aug/255]))
-                ys.append(coord.flatten())
-
-            coord = self.to_Lcoord(kpts.to_xy_array())
-            if self.check_out_of_bounds(img.shape, coord):
-                continue
-            xs.append(np.array([img]))
-            ys.append(coord.flatten())
+                img_aug, coord = self.run_aug(img, kpts)
+                if img_aug is not None:
+                    xs.append(img_aug)
+                    ys.append(coord.flatten())
 
         if len(xs) <= 0:
             return None, None, None
-        return np.stack(xs), np.stack(ys), (bsa.row_cut_pp, bsa.col_cut_pp)
+        return np.stack(xs)/255, np.stack(ys), (bsa.row_cut_pp, bsa.col_cut_pp)
 
     def imgs2xy(self, ds_name, data,
             row_inc, col_inc, scale, h_flip, v_flip, blur, noise,
@@ -578,6 +611,15 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
         if len(xs) <= 0:
             return None, None
         return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
+
+    def run_aug(self, img, kpts):
+        img = np.moveaxis(img, 0, -1).astype('uint8')
+        img_aug, kpts_aug = self.aug_seq(image=img, keypoints=kpts)  # img: (2, w, h) -> (w, h, 2)
+        coord = self.to_Lcoord(kpts_aug.to_xy_array())  # (3, 2)
+        if self.check_out_of_bounds(img_aug.shape[:2], coord):
+            return None, None  # skip if coord out of bounds
+        # take only r and g channels
+        return np.moveaxis(img_aug, -1, 0), coord
 
     def to_Lcoord(self, coord):
         '''
@@ -716,7 +758,7 @@ def get_dataset(data_dir, gal, args, save_dir=None):
         window_resize=args['window_resize'],
         window_expand=args['window_expand'],
         equalize=args['equalize'], morphology=args['morphology'])
-    data = dataset.read_dir_files(data_dir, gal)
+    data = read_dir_files(data_dir, gal)
     xs, ys = dataset.imgs2xy(data, augment=args['augment'], keep_ori=True)
 
     if save_dir:
@@ -750,7 +792,7 @@ def write_datasets():
         window_expand=args['window_expand'],
         equalize=args['equalize'], morphology=args['morphology'])
     for data_dir, gal in zip(data_dirs, gal_dirs):
-        data = dataset.read_dir_files(data_dir, gal)
+        data = read_dir_files(data_dir, gal)
         xs, ys = dataset.imgs2xy(data, augment=args['augment'], keep_ori=True)
         print(data_dir)
         print(xs.shape, ys.shape)
@@ -765,15 +807,14 @@ def write_reptile_dataset():
 
 
 if '__main__' == __name__:
-    dataset = BlockCornerCoordDataset(
-        window_resize=(256, 256), window_expand=2,
-        equalize=False, morphology=False)
-    xb, yb = dataset.img2xy(
-        'gridding/data/GEO/GSM15898_CH2.tif',
-        make_fake_gal(Gpr('gridding/data/GEO/GSM15898_CH2.gpr')),
-        'gridding/data/GEO/GSM15898_CH2.gpr', augment=0)
-    idxs = np.random.randint(xb.shape[0], size=5)
-    for i, (x, y) in enumerate(zip(xb[idxs], yb[idxs])):
-        im = x2rgbimg(x)
-        im = draw_parallelogram(im, y.reshape(3, 2), color=(0, 255, 0))
-        cv2.imwrite(f'gridding/imgs/test/GEO_{i}.png', im)
+    # dataset = BlockCornerCoordDataset(
+    #     window_resize=(256, 256), window_expand=2,
+    #     equalize=False, morphology=False, channel_mode='stack')
+    # xb, yb = dataset.img2xy(
+    #     'gridding/data/covid_gpr/2020.04.28_positive serum_No.2.tif',
+    #     'gridding/data/covid_gpr/Coronavirus.GAL',
+    #     'gridding/data/covid_gpr/2020.04.28_positive serum_No.2.gpr')
+    # write_corners_xybs(xb, yb, yb, 'gridding/imgs/test/gar/')
+    for task in os.listdir('gridding/data/few_shot_ch_stack/KD_focus'):
+        x = np.load(os.path.join('gridding/data/few_shot_ch_stack/KD_focus', task, 'x.npy'))
+        print(x.shape)

@@ -13,17 +13,71 @@ from .draw import *
 from .dataset import XYbDataset
 from .util import *
 
+
+class EarlyStopping:
+    """Early stops the training if validation loss doesn't improve after a given patience."""
+    def __init__(self, patience=10, verbose=True, delta=0, path='checkpoint.pt', trace_func=print):
+        """
+        Args:
+            patience (int): How long to wait after last time validation loss improved.
+                            Default: 7
+            verbose (bool): If True, prints a message for each validation loss improvement.
+                            Default: False
+            delta (float): Minimum change in the monitored quantity to qualify as an improvement.
+                            Default: 0
+            path (str): Path for the checkpoint to be saved to.
+                            Default: 'checkpoint.pt'
+            trace_func (function): trace print function.
+                            Default: print
+        """
+        self.patience = patience
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.val_loss_min = np.Inf
+        self.delta = delta
+        self.path = path
+        self.trace_func = trace_func
+
+    def __call__(self, val_loss, model):
+
+        score = -val_loss
+
+        if self.best_score is None:
+            self.best_score = score
+            self.save_checkpoint(val_loss, model)
+        elif score < self.best_score + self.delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.save_checkpoint(val_loss, model)
+            self.counter = 0
+
+    def save_checkpoint(self, val_loss, model):
+        '''Saves model when validation loss decrease.'''
+        if self.verbose:
+            self.trace_func(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
+        torch.save(model, self.path)
+        self.val_loss_min = val_loss
+
+
 def train_block_corner_coord_model(model, xtr, ytr, xva, yva, epochs=100, start_epoch=1,
-        batch_size=None, save_interval=5, output_dir='outputs/', device='cuda:0'):
+        batch_size=None, lr=(1e-3, 1e-2), save_interval=5, output_dir='outputs/', patience=10, device='cuda:0'):
 
     os.makedirs(os.path.join(output_dir, 'models'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'preds'), exist_ok=True)
 
+    model.to(device)
     loss_func = nn.SmoothL1Loss(reduction='mean')
     # optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=1e-3, max_lr=1e-2,
-        cycle_momentum=False, step_size_up=100, step_size_down=100)
+    steps = len(xtr) / batch_size
+    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=lr[0], max_lr=lr[1],
+        cycle_momentum=False, step_size_up=steps*4, step_size_down=steps*4)
+    earlystop = EarlyStopping(patience=patience, path=os.path.join(output_dir, 'models/best.pt'), verbose=True)
 
     # log file header
     if start_epoch <= 1:
@@ -39,8 +93,8 @@ def train_block_corner_coord_model(model, xtr, ytr, xva, yva, epochs=100, start_
         # ---------train---------
         model.train()
         trdl_bar = tqdm(trdl, ncols=100)
-        tr_losses, xbs, ybs, ypredbs = [], [], [], []
-        for xb, yb in trdl_bar:
+        tr_losses = []
+        for batch, (xb, yb) in enumerate(trdl_bar):
             xb, yb = torch.tensor(xb).float().to(device), torch.tensor(yb).float().to(device)
             ypredb = model(xb)
             loss = loss_func(ypredb, yb)
@@ -49,45 +103,42 @@ def train_block_corner_coord_model(model, xtr, ytr, xva, yva, epochs=100, start_
             loss.backward()
             optimizer.step()
             tr_loss = loss.item()
+            scheduler.step()
+
             tr_losses.append(tr_loss)
             trdl_bar.set_description(f'tr loss: {tr_loss:.3f}')
             writer.add_scalars('loss', {'tr': tr_loss} , epoch)
 
-            with torch.no_grad():
-                xbs.append(xb.cpu().numpy())
-                ybs.append(yb.cpu().numpy())
-                ypredbs.append(ypredb.cpu().numpy())
-
-            scheduler.step()
-
-        if epoch % save_interval == 0 and xbs is not None:
-            path = os.path.join(output_dir, f'preds/e{epoch}/tr')
-            os.makedirs(path, exist_ok=True)
-            write_corners_xybs(xbs, ybs, ypredbs, output_dir=path, n_samples=5)
+            if epoch % save_interval == 0 and xb is not None:
+                with torch.no_grad():
+                    path = os.path.join(output_dir, f'preds/e{epoch}/tr')
+                    os.makedirs(path, exist_ok=True)
+                    write_corners_xybs(
+                        xb.cpu().numpy(), yb.cpu().numpy(), ypredb.cpu().numpy(),
+                        output_dir=path, batch_no=batch, n_samples=1)
 
         # ---------validation---------
         model.eval()
         vadl_bar = tqdm(vadl, ncols=100)
-        va_losses, xbs, ybs, ypredbs = [], [], [], []
+        va_losses = []
         with torch.no_grad():
-            for xb, yb in vadl_bar:
+            for batch, (xb, yb) in enumerate(vadl_bar):
                 xb, yb = torch.tensor(xb).float().to(device), torch.tensor(yb).float().to(device)
                 ypredb = model(xb)
                 loss = loss_func(ypredb, yb)
+
                 va_loss = loss.item()
                 va_losses.append(va_loss)
                 vadl_bar.set_description(f'va loss: {va_loss:.3f}')
                 writer.add_scalars("loss", {'va': va_loss}, epoch)
 
-                xbs.append(xb.cpu().numpy())
-                ybs.append(yb.cpu().numpy())
-                ypredbs.append(ypredb.cpu().numpy())
-
-        if epoch % save_interval == 0 and xbs is not None:
-            path = os.path.join(output_dir, f'preds/e{epoch}/va/')
-            os.makedirs(path, exist_ok=True)
-            write_corners_xybs(xbs, ybs, ypredbs, output_dir=path, n_samples=5)
-            torch.save(model, os.path.join(output_dir, f'models/{epoch}.pt'))
+            if epoch % save_interval == 0 and xb is not None:
+                path = os.path.join(output_dir, f'preds/e{epoch}/va/')
+                os.makedirs(path, exist_ok=True)
+                write_corners_xybs(
+                    xb.cpu().numpy(), yb.cpu().numpy(), ypredb.cpu().numpy(),
+                    output_dir=path, batch_no=batch, n_samples=5)
+                torch.save(model, os.path.join(output_dir, f'models/{epoch}.pt'))
 
         tr_loss_mean = np.array(tr_losses).mean()
         va_loss_mean = np.array(va_losses).mean()
@@ -96,6 +147,12 @@ def train_block_corner_coord_model(model, xtr, ytr, xva, yva, epochs=100, start_
         print(f'lr: {lr}')
         write_file(f'{epoch},{tr_loss_mean},{va_loss_mean}',
             os.path.join(output_dir, 'training_log.txt'), mode='a')
+
+        if patience > 0:
+            earlystop(va_loss_mean, model)
+            if earlystop.early_stop:
+                break
+
     writer.flush()
 
 

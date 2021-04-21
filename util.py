@@ -85,7 +85,8 @@ class Gpr():
                     pass
 
 
-def read_tif(path, rgb=False, eq_method=None, clahe_kwargs={'clipLimit': 20, 'tileGridSize': (8, 8)}):
+def read_tif(path, rgb=False, eq_method=None, channel_mode=None,
+        clahe_kwargs={'clipLimit': 20, 'tileGridSize': (8, 8)}):
     ims = cv2.imreadmulti(path)[1]
     if not ims:
         print(f'{path} failed to read.')
@@ -96,6 +97,11 @@ def read_tif(path, rgb=False, eq_method=None, clahe_kwargs={'clipLimit': 20, 'ti
                                  clahe_kwargs=clahe_kwargs)
         if rgb:
             ims[i] = cv2.cvtColor(ims[i], cv2.COLOR_GRAY2RGB)
+    if channel_mode == 'max':
+        return np.clip(np.stack(ims).max(axis=0), 0, 255)
+    elif channel_mode == 'stack':
+        return np.stack(ims)
+
     return ims
 
 
@@ -112,7 +118,7 @@ def make_fake_gal(gpr):
         ncols = gpr.data.loc[b].index.get_level_values('Column').max()
         start = gpr.data.loc[b, 1, 1][['X', 'Y']].values
         end = gpr.data.loc[b, nrows, ncols][['X', 'Y']].values
-        rand_center = start + (end - start) * np.random.uniform(.1, .9)
+        rand_center = start + (end - start) * np.random.uniform(.2, .8)
 
         dxy = gpr.data.loc[b, nrows, 1][['X', 'Y']].values - \
             gpr.data.loc[b, 1, 1][['X', 'Y']].values
@@ -132,6 +138,7 @@ def make_fake_gal(gpr):
 
 
 def im_equalize(im, method='clahe', clahe_kwargs={'clipLimit': 20, 'tileGridSize': (8, 8)}):
+    im = im.astype(np.uint8)
     if method == 'clahe':
         return cv2.createCLAHE(**clahe_kwargs).apply(im)
     return cv2.equalizeHist(im)
@@ -177,7 +184,7 @@ def get_window_coords(gal, b, expand=None, size=None, pixel_size=10):
 def crop_window(im, p1, p2, pad_val=0):
     # it is assumed that if p1 is out of bounds, then p2 will not, vice versa
     winh, winw = p2[1]-p1[1], p2[0]-p1[0]
-    h, w = im.shape
+    h, w = im.shape[-2:]
     xstart, ystart, xend, yend = 0, 0, w, h
     if p1[0] < 0:
         xstart = -p1[0]
@@ -187,12 +194,20 @@ def crop_window(im, p1, p2, pad_val=0):
         xend = w - p1[0]
     if p2[1] >= h:
         yend = h - p1[1]
-    cropped = im[
-        np.clip(p1[1], 0, h): np.clip(p2[1], 0, h),
-        np.clip(p1[0], 0, w): np.clip(p2[0], 0, w)
-    ]
-    padded = np.full((winh, winw), pad_val)
-    padded[ystart:yend, xstart:xend] = cropped
+
+    if len(im.shape) > 2:  # shape (c, h, w)
+        cropped = im[:,
+            np.clip(p1[1], 0, h): np.clip(p2[1], 0, h),
+            np.clip(p1[0], 0, w): np.clip(p2[0], 0, w)]
+        padded = np.full((im.shape[0], winh, winw), pad_val)
+        padded[:, ystart:yend, xstart:xend] = cropped
+    else:
+        cropped = im[
+            np.clip(p1[1], 0, h): np.clip(p2[1], 0, h),
+            np.clip(p1[0], 0, w): np.clip(p2[0], 0, w)]
+        padded = np.full((winh, winw), pad_val)
+        padded[ystart:yend, xstart:xend] = cropped
+
     return padded
 
 
@@ -209,15 +224,15 @@ def im_rotate(image, angle, center=None, scale=1.0):
     return cv2.warpAffine(image, mat, (w, h))
 
 
-def is_iterable(x):  # except str
+def is_listlike(x):  # except str
     return (type(x) is list) or (type(x) is tuple)
 
 
 def write_file(data, path, mode='w'):
     with open(path, mode) as f:
-        if is_iterable(data):
+        if is_listlike(data):
             for row in data:
-                if is_iterable(row):
+                if is_listlike(row):
                     # might contain gal path = None
                     row = [str(item) for item in row]
                     f.write(','.join(row) + '\n')
@@ -227,25 +242,35 @@ def write_file(data, path, mode='w'):
             f.write(str(data) + '\n')
 
 
+def write_dict(d, path):
+    with open(path, 'w') as f:
+        f.write(json.dumps(d))
+
+
 def eval_gridding(gpr, pred, gal=None, mode='spot', tolerance=.5,
         gpr_coords=['X', 'Y'], pred_coords=['x', 'y'], pixel_size=10):
     '''
+    assume coord information of 1 image (chip)
+
     pred_df: block corner coord or spot coord
     mode: 'spot' or 'block'
     tolerance: for acc calculation
                False spot if distance > tolerance * min(row margin, col margin)
     '''
+    if gal is None:
+        gal = make_fake_gal(gpr)
+    # rename columns to avoid auto rename while merging
     for i, (gpr_coord, pred_coord) in enumerate(zip(gpr_coords, pred_coords)):
         if gpr_coord == pred_coord:
             pred = pred.rename(columns={pred_coord: pred_coord+'_'})
             pred_coords[i] = pred_coord+'_'
-    if gal is None:
-        gal = make_fake_gal(gpr)
-    thres = tolerance * min(gal.header['Block1'][Gal.COL_MARGIN], gal.header['Block1'][Gal.ROW_MARGIN]) // pixel_size
+
+    col_thres = tolerance * gal.header['Block1'][Gal.COL_MARGIN] // pixel_size
+    row_thres = tolerance * gal.header['Block1'][Gal.ROW_MARGIN] // pixel_size
     df = pd.merge(gpr.data, pred, on=['Block', 'Row', 'Column'], how='left')
     gt, pred = df[gpr_coords].values // pixel_size, df[pred_coords].values
-    dist = np.sqrt(((gt - pred) ** 2).sum(axis=1))  # sqrt((x - x')**2 + (y - y')**2)
-    hits = dist <= thres
+    dist = np.abs(gt - pred)
+    hits = (dist[:, 0] <= col_thres) & (dist[:, 1] <= row_thres)
     return dist, hits
 
 
@@ -272,6 +297,29 @@ def data_split(x, y, tr_size, va_size=None, shuffle=True, output_dir=None):
     if va_size is not None:
         return x[tr_idx], x[va_idx], x[te_idx], y[tr_idx], y[va_idx], y[te_idx]
     return x[tr_idx], x[va_idx], y[tr_idx], y[va_idx]
+
+
+def read_csv(csv, table=True):
+    '''
+    table: if True, read as 2D list, else 1D
+    '''
+    with open(csv) as f:
+        data = f.readlines()
+        if table:
+            data = [line.strip().split(',') for line in data]
+        else:
+            data = [line.strip() for line in data]
+    return data
+
+
+def read_dir_files(dirs, gal_path:str, exclude=[]):
+    results = []
+    for d in dirs:
+        for f in os.listdir(d):
+            f = os.path.join(d, f)
+            if f.endswith('.tif') and not (f in exclude):
+                results.append((f, gal_path, f.replace('.tif', '.gpr')))
+    return results
 
 
 if __name__ == '__main__':

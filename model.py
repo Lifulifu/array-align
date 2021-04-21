@@ -4,25 +4,29 @@ import torch.nn.functional as F
 import torchvision.models as models
 # import IPython; IPython.embed(); exit()
 
+
 class Resnet(nn.Module):
-    def __init__(self):
+    def __init__(self, channels=1, pretrained=True):
         super().__init__()
-        self.resnet = models.resnet18(pretrained=True)
-        self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.resnet = models.resnet18(pretrained=pretrained)
+        self.resnet.conv1 = nn.Conv2d(
+            channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.resnet.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.resnet.fc = nn.Linear(512, 6, bias=True)
 
     def forward(self, x):
         return self.resnet(x)
 
+
 class SlidingWindowHourglassNet(nn.Module):
     def __init__(self):
         super().__init__()
-        resnet = models.resnet18(pretrained=False) # downsample * 6
-        resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        resnet = models.resnet18(pretrained=False)  # downsample * 6
+        resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7,
+                                 stride=2, padding=3, bias=False)
         self.down = torch.nn.Sequential(*(list(resnet.children())[:-2]))
         self.up = self._make_up_layers(512, [256, 256, 256, 128, 128])
-        self.final_layer = nn.Conv2d( # channels: confidence, x1, y1, x2, y2, x3, y3
+        self.final_layer = nn.Conv2d(  # channels: confidence, x1, y1, x2, y2, x3, y3
             in_channels=128,
             out_channels=7,
             kernel_size=3,
@@ -50,11 +54,13 @@ class SlidingWindowHourglassNet(nn.Module):
         x = self.up(x)
         return self.final_layer(x)
 
+
 class HourglassNet(nn.Module):
     def __init__(self):
         super().__init__()
-        resnet = models.resnet18(pretrained=False) # downsample * 6
-        resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        resnet = models.resnet18(pretrained=False)  # downsample * 6
+        resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7,
+                                 stride=2, padding=3, bias=False)
         self.down = torch.nn.Sequential(*(list(resnet.children())[:-2]))
         self.up = self._make_up_layers(512, [256, 256, 256, 128, 128])
         self.final_layer = nn.Conv2d(
@@ -86,7 +92,8 @@ class HourglassNet(nn.Module):
         return self.final_layer(x)
 
 
-
 if '__main__' == __name__:
     m = HourglassNet()
-    import IPython; IPython.embed(); exit()
+    import IPython
+    IPython.embed()
+    exit()

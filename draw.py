@@ -23,33 +23,44 @@ def to_color(grayscale, channel, alpha=False):  # {{{
     rgb[:, :, channel] = grayscale
     return rgb
 
-def x2rgbimg(x, alpha=False, eq=False):
+def x2rgbimg(x, eq=False):
     '''
-    x is assumed to be [0~1] numpy array of shape (h, w) or (1, h, w)
+    x is assumed to have shape (h, w) or (c, h, w)
     '''
-    if len(x.shape) >= 3:
-        assert x.shape[0] == 1
-        x = x[0] # from (1, h, w) to (h, w)
-    x = (x * 255).astype(np.uint8)
-    if eq:
-        x = im_equalize(x, method='clahe')
-    if alpha:
-        return cv2.cvtColor(x, cv2.COLOR_GRAY2RGBA)
-    return cv2.cvtColor(x, cv2.COLOR_GRAY2RGB)
+    if x.max() <= 1:
+        x = (x * 255)
+    x = x.astype(np.uint8)
 
-def write_corners_xybs(xbs, ybs, ypredbs, output_dir, n_samples=None, eq=False):
+    # (h, w) or (1, h, w)
+    if (len(x.shape) < 3) or (
+            (len(x.shape) == 3) and (x.shape[0] == 1)):
+        if x.shape[0] == 1: x = x[0]
+        if eq: x = im_equalize(x, method=eq)
+        return cv2.cvtColor(x, cv2.COLOR_GRAY2RGB)
+
+    # (c, h, w)
+    if eq:
+        x = np.stack([im_equalize(plane, method=eq) for plane in x])
+    if x.shape[0] < 3:
+        assert x.shape[0] == 2
+        blank = np.zeros((1, x.shape[1], x.shape[2]))
+        x = np.concatenate([x, blank]).astype(np.uint8)  # add blank 3rd channel
+    return cv2.cvtColor(np.moveaxis(x, 0, -1), cv2.COLOR_BGR2RGB)
+
+
+def write_corners_xybs(xb, yb, ypredb, output_dir, n_samples=False, eq=False, batch_no=0):
     os.makedirs(output_dir, exist_ok=True)
-    for batch, (xb, yb, ypredb) in enumerate(zip(xbs, ybs, ypredbs)):
-        if n_samples:
-            xb, yb, ypredb = xb[:n_samples], yb[:n_samples], ypredb[:n_samples]
-        for i, (x, y, ypred) in enumerate(zip(xb, yb, ypredb)):
-            im = x2rgbimg(x, eq=eq)
-            y = y.reshape((-1, 2)).astype('int32')
-            ypred = ypred.reshape((-1, 2)).astype('int32')
-            im = draw_parallelogram(im, y, color=(0, 255, 0), thickness=1)
-            im = draw_parallelogram(im, ypred, color=(255, 0, 0), thickness=1)
-            if not cv2.imwrite(os.path.join(output_dir, f'b{batch}-{i}.png'), im):
-                print('imwrite failed.')
+    if n_samples:
+        idxs = np.random.randint(len(xb), size=n_samples)
+        xb, yb, ypredb = xb[idxs], yb[idxs], ypredb[idxs]
+    for i, (x, y, ypred) in enumerate(zip(xb, yb, ypredb)):
+        im = x2rgbimg(x, eq=eq)
+        y = y.reshape((-1, 2)).astype('int32')
+        ypred = ypred.reshape((-1, 2)).astype('int32')
+        im = draw_parallelogram(im, y, color=(0, 255, 0), thickness=1)
+        im = draw_parallelogram(im, ypred, color=(255, 0, 0), thickness=1)
+        if not cv2.imwrite(os.path.join(output_dir, f'{batch_no}_{i}.png'), im):
+            print('imwrite failed.')
 
 def draw_parallelogram(im, pts, label=True, label_offset=5, color=255, thickness=2):
     '''
@@ -103,7 +114,7 @@ def draw_corners_df(im, block_coords, color=255):
 def draw_spots(im, spot_coords, color=255):
     for spot_coord in spot_coords:
         im = cv2.circle(im, (int(round(spot_coord[0])), int(round(spot_coord[1]))),
-            5, color=color, thickness=2)
+            5, color=color, thickness=1)
     return im
 
 def draw_all_info(im_path, gal, gpr, eq=None, **window_kwargs):
