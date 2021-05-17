@@ -69,8 +69,9 @@ class Gpr():
         self.data = [row.split('\t') for row in data[data_start_i:]]
         self.data = pd.DataFrame(self.data[1:], columns=self.data[0])
         self.data = self.data.astype({
-            'Block': int, 'Column': int, 'Row': int, 'X': int, 'Y': int})
+            'Block': int, 'Column': int, 'Row': int, 'X': int, 'Y': int, 'Dia.': int})
         self.data = self.data.set_index(['Block', 'Row', 'Column'])
+        self.diameter = self.data['Dia.'].median()
 
         # header part
         self.header = {}
@@ -267,6 +268,34 @@ def eval_gridding(gpr, pred, gal=None, mode='spot', tolerance=.5,
 
     col_thres = tolerance * gal.header['Block1'][Gal.COL_MARGIN] // pixel_size
     row_thres = tolerance * gal.header['Block1'][Gal.ROW_MARGIN] // pixel_size
+    df = pd.merge(gpr.data, pred, on=['Block', 'Row', 'Column'], how='left')
+    gt, pred = df[gpr_coords].values // pixel_size, df[pred_coords].values
+    dist = np.abs(gt - pred)
+    hits = (dist[:, 0] <= col_thres) & (dist[:, 1] <= row_thres)
+    return dist, hits
+
+
+def eval_gridding2(gpr, pred, gal=None, mode='spot', tolerance=.5,
+        gpr_coords=['X', 'Y'], pred_coords=['x', 'y'], pixel_size=10):
+    '''
+    assume coord information of 1 image (chip)
+
+    pred_df: block corner coord or spot coord
+    mode: 'spot' or 'block'
+    tolerance: for acc calculation
+               False spot if distance > tolerance * min(row margin, col margin)
+    '''
+    if gal is None:
+        gal = make_fake_gal(gpr)
+    # rename columns to avoid auto rename while merging
+    for i, (gpr_coord, pred_coord) in enumerate(zip(gpr_coords, pred_coords)):
+        if gpr_coord == pred_coord:
+            pred = pred.rename(columns={pred_coord: pred_coord+'_'})
+            pred_coords[i] = pred_coord+'_'
+
+    cut_dist = (gpr.diameter // pixel_size) * 0.5 * 0.49186183276371  # assume out of bounds proportion = 0.8
+    col_thres = tolerance * (gal.header['Block1'][Gal.COL_MARGIN] // pixel_size) - cut_dist
+    row_thres = tolerance * (gal.header['Block1'][Gal.ROW_MARGIN] // pixel_size) - cut_dist
     df = pd.merge(gpr.data, pred, on=['Block', 'Row', 'Column'], how='left')
     gt, pred = df[gpr_coords].values // pixel_size, df[pred_coords].values
     dist = np.abs(gt - pred)

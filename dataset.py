@@ -119,7 +119,7 @@ class BlockSizeAugmentor():
             aug_img
             coords: corner coords (4, 2)
         '''
-        img_aug, corners_aug,  row_cut_coords = self.augment_row(
+        img_aug, corners_aug, row_cut_coords = self.augment_row(
             img, corners, row_inc)
         img_aug, corners_aug, col_cut_coords = self.augment_col(
             img_aug, corners_aug, col_inc)
@@ -273,6 +273,7 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
             aug.Affine(
                 translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)},
                 rotate=(-5, 5),
+                mode='wrap'
             )], random_order=True)
         self.cache = dict()
 
@@ -284,17 +285,13 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
             blocks:
                 If None, get all blocks in img.
                 If given list / set, get only the blocks in the list
-        returns:
-            xs:
-                cropped window, grayscale[0~255]=>[0~1]
-                shape ( #blocks, 1, win_shape[0], win_shape[1] )
             ys:
                 top left, bottom left, bottom right XYs of a block (L shape)
                 (relative to window coords)
                 shape ( #blocks*2, 6 )
             is_ori (1D array):
                 True : sample is original data
-                False: sample is augmented
+                False: sample is augmented data
         '''
 
         gal = make_fake_gal(Gpr(gpr_path)) if gal_path == '' else Gal(gal_path)
@@ -325,37 +322,26 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
                 ys.append(coord.flatten())
                 is_ori.append(True)
 
-            #! channel_mode not implemented
             if bsa_args is not None:
-                bsa = BlockSizeAugmentor((nrows, ncols))
-                if bsa_args['n'] >= 1:
-                    augxs, augys = [], []
-                    while len(augxs) < bsa_args['n']:
-                        row_inc = np.random.choice(bsa_args['row_inc_choice'])
-                        col_inc = np.random.choice(bsa_args['col_inc_choice'])
-                        img_aug, kpts_aug, cut_coords = bsa.augment(
-                            img[0], kpts.to_xy_array(), row_inc, col_inc)
-                        coord = self.to_Lcoord(
-                            kpts_aug.to_xy_array())  # (3, 2)
-                        if self.check_out_of_bounds(img_aug.shape, coord):
-                            continue  # skip if coord out of bounds
-                        augxs.append(np.array([img_aug]))
-                        augys.append(coord.flatten())
-                    xs.extend(augxs)
-                    ys.extend(augys)
-                    is_ori.extend([False]*len(augxs))
-                elif np.random.rand() < bsa_args['n']:
+                augxs, augys = [], []
+                while len(augxs) < bsa_args['n']:
                     row_inc = np.random.choice(bsa_args['row_inc_choice'])
                     col_inc = np.random.choice(bsa_args['col_inc_choice'])
-                    img_aug, kpts_aug, cut_coords = bsa.augment(
-                        img[0], kpts.to_xy_array(), row_inc, col_inc)
-                    coord = self.to_Lcoord(kpts_aug.to_xy_array())  # (3, 2)
-                    if self.check_out_of_bounds(img_aug.shape, coord):
-                        continue  # skip if coord out of bounds
-                    xs.append(np.array([img_aug]))
-                    ys.append(coord.flatten())
-                    is_ori.append(False)
-            #!
+                    bsa = BlockSizeAugmentor((nrows, ncols))
+                    img_ = []
+                    kpts_ = kpts.copy()
+                    for im in img:
+                        im, kpts, _ = bsa.augment(im, kpts_.to_xy_array(), row_inc, col_inc)
+                        img_.append(im)
+                    img = np.stack(img_).astype('uint8')
+                    coord = self.to_Lcoord(kpts.to_xy_array())
+                    if self.check_out_of_bounds(img.shape[1:], coord):
+                        continue
+                    augxs.append(img)
+                    augys.append(coord.flatten())
+                xs.extend(augxs)
+                ys.extend(augys)
+                is_ori.extend([False]*len(augxs))
 
             if augment >= 1:
                 augxs, augys = [], []
@@ -444,6 +430,7 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
             aug.Affine(
                 translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)},
                 rotate=(-5, 5),
+                mode='wrap'
             )])
 
         self.img_cache = dict()  # saved img2x
@@ -453,7 +440,7 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
         ds_name = np.random.choice(list(self.dataset_choices.keys()))
         data = self.dataset_choices[ds_name]
         if type(data) is str:
-            data = read_file_names_from_csv(data)
+            data = read_csv(data)
         row_inc = np.random.choice(
             self.row_inc_choices) if self.row_inc_choices is not None else 0
         col_inc = np.random.choice(
@@ -480,14 +467,12 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
             'h_flip': h_flip,
             'v_flip': v_flip,
         }
-        xs, ys = self.imgs2xy(ds_name, data, row_inc, col_inc, scale, h_flip, v_flip,
+        xs, ys, isori = self.imgs2xy(ds_name, data, row_inc, col_inc, scale, h_flip, v_flip,
             blur, noise, augment=augment)
         if xs is None:
             return None, args
         idxs = [i for i in range(len(xs))]
-        np.random.shuffle(idxs)  # inplace
-        xs, ys = xs[idxs], ys[idxs]  # shuffle
-        return (xs, ys), args
+        return (xs, ys, isori), args
 
     def img2xy(self, ds_name, img_path, gal_path, gpr_path,
             row_inc, col_inc, scale, h_flip, v_flip, blur, noise,
@@ -507,10 +492,10 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
             self.img_cache[img_path] = idxs, imgs, df, scales
         if (imgs is None) or (df is None):
             print(f'{img_path} failed.')
-            return None, None, None
+            return None, None, None, None
 
         h, w = imgs.shape[-2], imgs.shape[-1]
-        xs, ys = [], []
+        xs, ys, isori = [], [], []
         for (img_path, b, c), img, block_df in zip(idxs, imgs, df):
             nrows = gal.header[f'Block{b}'][Gal.N_ROWS]
             ncols = gal.header[f'Block{b}'][Gal.N_COLS]
@@ -548,7 +533,7 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
                 img, kpts = aug_func(image=img, keypoints=kpts)
             # scale
             if scale != 1:
-                aug_func = aug.Affine(scale=scale)
+                aug_func = aug.Affine(scale=scale, mode='wrap')
                 img, kpts = aug_func(image=img, keypoints=kpts)
                 if self.check_out_of_bounds(img.shape[:2], kpts.to_xy_array()):
                     continue
@@ -567,6 +552,7 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
                 continue
             xs.append(img)
             ys.append(coord.flatten())
+            isori.append(True)
 
             # augment
             if augment >= 1:
@@ -574,7 +560,7 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
                 while len(augxs) < augment:
                     img_aug, coord = self.run_aug(img, kpts)
                     if fail_count > 5:
-                        return None, None, None
+                        return None, None, None, None
                     if img_aug is None:
                         fail_count += 1
                         continue
@@ -582,15 +568,17 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
                     augys.append(coord.flatten())
                 xs.extend(augxs)
                 ys.extend(augys)
+                isori.extend([False] * len(augxs))
             elif np.random.rand() < augment:
                 img_aug, coord = self.run_aug(img, kpts)
                 if img_aug is not None:
                     xs.append(img_aug)
                     ys.append(coord.flatten())
+                    isori.append(False)
 
         if len(xs) <= 0:
-            return None, None, None
-        return np.stack(xs)/255, np.stack(ys), (bsa.row_cut_pp, bsa.col_cut_pp)
+            return None, None, None, None
+        return np.stack(xs)/255, np.stack(ys), np.stack(isori), (bsa.row_cut_pp, bsa.col_cut_pp)
 
     def imgs2xy(self, ds_name, data,
             row_inc, col_inc, scale, h_flip, v_flip, blur, noise,
@@ -600,17 +588,18 @@ class MetaBlockCornerCoordDataset(ArrayBlockDataset):
         args: lists of img and gpr paths
         returns: aggregated x, y nparrays
         '''
-        xs, ys = [], []
+        xs, ys, isoris = [], [], []
         for img_path, gal_path, gpr_path in data:
-            x, y, cut_pp = self.img2xy(
+            x, y, isori, cut_pp = self.img2xy(
                 ds_name, img_path, gal_path, gpr_path,
                 row_inc, col_inc, scale, h_flip, v_flip, blur, noise, augment, cut_pp)
             if (x is not None) and (y is not None):
                 xs.append(x)
                 ys.append(y)
+                isoris.append(isori)
         if len(xs) <= 0:
-            return None, None
-        return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
+            return None, None, None
+        return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0), np.concatenate(isoris, axis=0)
 
     def run_aug(self, img, kpts):
         img = np.moveaxis(img, 0, -1).astype('uint8')

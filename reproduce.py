@@ -4,9 +4,14 @@ from skimage.transform import radon
 import numpy as np
 import matplotlib.pyplot as plt
 import cv2
+from scipy import ndimage
+import math
 
 from gridding.util import *
 from gridding.dataset import *
+
+from .dehaze.dehaze import dehaze
+
 
 def get_local_gridding_imgs(img_path, gal: Gal, gpr: Gpr, pixel_size=10):
     ims = read_tif(img_path)
@@ -26,16 +31,25 @@ def get_local_gridding_imgs(img_path, gal: Gal, gpr: Gpr, pixel_size=10):
     return idxs, result, window_coords
 
 
-def median_filter_3D(im, kernel_size):
+def im_sharpen(im, kernel_size=3, rate=.1):
+    '''
+    im: [0, 255]
+    high pass = im - blurred_im
+    result = im + high pass * rate
+    '''
+    lowpass = ndimage.gaussian_filter(im, kernel_size)
+    return np.clip(im + (im - lowpass), 0, 255)
+
+
+def median_filter_3D(im, kernel_size=(3, 3)):
     '''
     img: (c, h, w)
     '''
     h, w = im.shape[1:]
-    result_h = h - kernel_size[0] + 1
-    result_w = w - kernel_size[1] + 1
-    result = np.zeros((result_h, result_w))
-    for i in range(result_h):
-        for j in range(result_w):
+    im = np.pad(im, [[0, 0], [0, kernel_size[0]//2], [0, kernel_size[1]//2]], mode='edge')
+    result = np.zeros((h, w))
+    for i in range(h):
+        for j in range(w):
             result[i, j] = np.median(
                 im[:, i:i+kernel_size[0], j:j+kernel_size[1]])
     return result  # (h, w)
@@ -90,15 +104,14 @@ def tilt_correct(im, max_tilt=30, resolution=10):
     return im_rotate(im, -angle)
 
 
-def im_sharpen(im, kernal_size=3, rate=.1):
+def im_sharpen(im, kernel_size=3, rate=.1):
     '''
     im: [0, 255]
     high pass = im - blurred_im
     result = im + high pass * rate
     '''
-    hp = np.clip(im - cv2.GaussianBlur(im,
-                                       (kernal_size, kernal_size), 0), 0, 255)
-    return np.clip(hp * rate + im, 0, 255)
+    lowpass = ndimage.gaussian_filter(im, kernel_size)
+    return np.clip(im + (im - lowpass), 0, 255)
 
 
 def get_peaks(hist):
@@ -141,7 +154,7 @@ def refine_peaks(peaks, sp_tolerance=.2):
         elif spacings[i] < min_sp:
             less_count += 1
         elif spacings[i] >= max_sp:
-            n_skipped = int(spacings[i] / med_sp)
+            n_skipped = int(spacings[i] / max_sp)
             for j in range(n_skipped):
                 result.append(peaks[i] + med_sp * (j+1))
             result.append(peaks[i+1])
@@ -152,7 +165,8 @@ def refine_peaks(peaks, sp_tolerance=.2):
 
 
 def draw_gridlines(im, x_lines, y_lines, x_color=(0, 0, 255), y_color=(0, 255, 0), thickness=1):
-    im = x2rgbimg(im)
+    if len(im.shape) <= 2 or im.shape[-1] == 1:
+        im = x2rgbimg(im)
     for x in x_lines:
         im = cv2.polylines(im, [
             np.array([[x, 0], [x, im.shape[0]]])], True, x_color, thickness)
@@ -172,22 +186,23 @@ def rotate_coords(coords, angle, origin):
 
 
 def joseph_predict_pipeline(img_path, gal: Gal, gpr: Gpr,
-                            pixel_size=10, kernel_size=(3, 3), max_tilt=30):
+                            pixel_size=10, kernel_size=(5, 5), max_tilt=30):
+    '''
+    all, cut=.5: 0.63
+    no eq, cut=.5: .37
+    img max merge: 
+    '''
 
     idxs, imgs, window_coords = get_local_gridding_imgs(img_path, gal, gpr, pixel_size)
     result_idxs, spots = [], []
     for idx, img, window_coord in tqdm(zip(idxs, imgs, window_coords), total=len(idxs)):
         # median filtering
         img = median_filter_3D(img, kernel_size)
-        # img = img.max(axis=0).astype(np.uint8)
+        # img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         # top hat filtering
-        # kernel = np.ones((3, 3),np.uint8)
-        # img = cv2.morphologyEx(img, cv2.MORPH_TOPHAT, kernel)
-
-        # morph opening
-        # kernel = np.ones((5, 5),np.uint8)
-        # img = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
+        kernel = np.ones(kernel_size, np.uint8)
+        img = cv2.morphologyEx(img, cv2.MORPH_TOPHAT, kernel)
 
         # eq
         img = im_equalize(img, 'clahe')
@@ -196,13 +211,19 @@ def joseph_predict_pipeline(img_path, gal: Gal, gpr: Gpr,
         angle, _ = get_tilt_angle(img, max_tilt)
         img = im_rotate(img, -angle)
 
+        # sharpen
+        img = im_sharpen(img, kernel_size[0], rate=.2)
+
         # refine projections
         x_hist, y_hist = img.mean(axis=0), img.mean(axis=1)
+        # x_hist = np.clip(x_hist, 0, x_hist.min() + (x_hist.max()-x_hist.min()) * .5)
+        # y_hist = np.clip(y_hist, 0, y_hist.min() + (y_hist.max()-y_hist.min()) * .5)
         x_peaks = get_peaks(x_hist)
         y_peaks = get_peaks(y_hist)
         x_refined = refine_peaks(x_peaks)
         y_refined = refine_peaks(y_peaks)
 
+        img = draw_gridlines(img, x_refined, y_refined, x_color=(255,0,0), y_color=(255,0,0))
         img = draw_gridlines(img, x_peaks, y_peaks)
         cv2.imwrite(f'gridding/imgs/test/rep_test/{idx[1]}.png', img)
 
@@ -227,3 +248,24 @@ def joseph_predict_pipeline(img_path, gal: Gal, gpr: Gpr,
         ['img_path', 'Block', 'Column', 'Row'])
     spots = np.concatenate(spots)
     return pd.DataFrame(spots, index=result_idxs, columns=['x', 'y'])
+
+
+if __name__ == '__main__':
+    files = read_csv('gridding/data/split/GEO_merged/te.csv')[0]
+    gpr = Gpr(files[2])
+    im, gal = files[0], make_fake_gal(gpr)
+    idxs, imgs, _ = get_local_gridding_imgs(im, gal, gpr)
+    im = imgs[0]
+    med = np.expand_dims(median_filter_3D(im), axis=-1)
+    im = np.moveaxis(im, 0, -1)
+    im = np.concatenate([im, med], axis=-1).astype(np.uint8)
+    print(im.shape, im[:,:,0].max(), im[:,:,1].max(), im[:,:,2].max())
+
+    output_dir = 'gridding/imgs/test/dehaze/'
+    dark, rawt, refinedt, rawrad, rerad = dehaze(im)
+    print(dark.shape, dark.max())
+    cv2.imwrite(output_dir+'dark.png', dark)
+    cv2.imwrite(output_dir+'rawt.png', rawt)
+    cv2.imwrite(output_dir+'refinedt.png', refinedt)
+    cv2.imwrite(output_dir+'rawrad.png', rawrad)
+    cv2.imwrite(output_dir+'rerad.png', rerad)

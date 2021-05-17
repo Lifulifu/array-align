@@ -15,11 +15,12 @@ from .model import Resnet
 from .draw import *
 from .dataset import *
 from .util import *
+from .train import EarlyStopping
 
 
 class Reptile():
-    def __init__(self, model, tr_tasks, te_tasks, epsilon=1, channels=1,
-                 meta_start_epoch=1, meta_epochs=1000, meta_batch_size=4, augment=5,
+    def __init__(self, model, tr_tasks=[], te_tasks=[], epsilon=1, channels=1,
+                 meta_start_epoch=1, meta_epochs=1000, meta_batch_size=4, augment=5, patience=0,
                  meta_lr=1e-3, task_epochs=10, task_tr_size=5, task_te_size=None, task_te_epochs=100,
                  task_lr=1e-3, save_interval=5, output_dir='outputs/', device='cuda:0'):
         self.model = model.to(device)
@@ -33,6 +34,7 @@ class Reptile():
         self.meta_epochs = meta_epochs
         self.meta_lr = meta_lr
         self.meta_batch_size = meta_batch_size
+        self.patience = patience
 
         self.task_epochs = task_epochs
         self.task_te_epochs = task_te_epochs
@@ -50,6 +52,7 @@ class Reptile():
             aug.Affine(
                 translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)},
                 rotate=(-5, 5),
+                mode='wrap'
             )], random_order=True)
 
     def average_states(self, dict_list):
@@ -195,6 +198,7 @@ class Reptile():
             write_file('epoch,tr_loss,va_loss',
                        os.path.join(self.output_dir, 'training_log.txt'), mode='w')
         writer = SummaryWriter(log_dir=os.path.join(self.output_dir, 'logs/'))
+        earlystop = EarlyStopping(patience=self.patience, path=os.path.join(self.output_dir, 'models/best.pt'), verbose=True)
 
         for epoch in range(self.meta_start_epoch, self.meta_start_epoch + self.meta_epochs):
             # --- Train ---

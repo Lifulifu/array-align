@@ -87,6 +87,7 @@ def train_block_corner_coord_model(model, xtr, ytr, xva, yva, epochs=100, start_
     trdl = DataLoader(XYbDataset(xtr, ytr), batch_size=batch_size, shuffle=True)
     vadl = DataLoader(XYbDataset(xva, yva), batch_size=batch_size, shuffle=True)
 
+    best_epoch = 0
     for epoch in range(start_epoch, start_epoch+epochs):
         print(f'\nepoch {epoch}')
 
@@ -115,7 +116,7 @@ def train_block_corner_coord_model(model, xtr, ytr, xva, yva, epochs=100, start_
                     os.makedirs(path, exist_ok=True)
                     write_corners_xybs(
                         xb.cpu().numpy(), yb.cpu().numpy(), ypredb.cpu().numpy(),
-                        output_dir=path, batch_no=batch, n_samples=1)
+                        output_dir=path, batch_no=batch, n_samples=5)
 
         # ---------validation---------
         model.eval()
@@ -148,11 +149,13 @@ def train_block_corner_coord_model(model, xtr, ytr, xva, yva, epochs=100, start_
         write_file(f'{epoch},{tr_loss_mean},{va_loss_mean}',
             os.path.join(output_dir, 'training_log.txt'), mode='a')
 
-        if patience > 0:
-            earlystop(va_loss_mean, model)
-            if earlystop.early_stop:
-                break
+        earlystop(va_loss_mean, model)
+        if earlystop.counter == 0:
+            best_epoch = epoch
+        if patience > 0 and earlystop.early_stop:
+            break
 
+    write_file(f'best epoch: {best_epoch}', os.path.join(output_dir, 'training_log.txt'), mode='a')
     writer.flush()
 
 
