@@ -18,6 +18,19 @@ class Resnet(nn.Module):
         return self.resnet(x)
 
 
+class Resnet50(nn.Module):
+    def __init__(self, channels=1, pretrained=True):
+        super().__init__()
+        self.resnet = models.resnet50(pretrained=pretrained)
+        self.resnet.conv1 = nn.Conv2d(
+            channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.resnet.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.resnet.fc = nn.Linear(512, 6, bias=True)
+
+    def forward(self, x):
+        return self.resnet(x)
+
+
 class SlidingWindowHourglassNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -93,7 +106,7 @@ class HourglassNet(nn.Module):
 
 
 if '__main__' == __name__:
-    m = HourglassNet()
+    m = Resnet()
     import IPython
     IPython.embed()
     exit()

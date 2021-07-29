@@ -268,7 +268,7 @@ class BlockCornerCoordDataset(ArrayBlockDataset):
             # aug.VerticalFlip(0.5),
             aug.Sometimes(0.2, aug.GaussianBlur(sigma=(0, 0.2))),
             aug.LinearContrast((0.8, 1.2)),
-            aug.AdditiveGaussianNoise(scale=(0.0, 0.05*255)),
+            # aug.AdditiveGaussianNoise(scale=(0.0, 0.05*255)),
             aug.Multiply((0.8, 1.0)),
             aug.Affine(
                 translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)},
@@ -796,14 +796,4 @@ def write_reptile_dataset():
 
 
 if '__main__' == __name__:
-    # dataset = BlockCornerCoordDataset(
-    #     window_resize=(256, 256), window_expand=2,
-    #     equalize=False, morphology=False, channel_mode='stack')
-    # xb, yb = dataset.img2xy(
-    #     'gridding/data/covid_gpr/2020.04.28_positive serum_No.2.tif',
-    #     'gridding/data/covid_gpr/Coronavirus.GAL',
-    #     'gridding/data/covid_gpr/2020.04.28_positive serum_No.2.gpr')
-    # write_corners_xybs(xb, yb, yb, 'gridding/imgs/test/gar/')
-    for task in os.listdir('gridding/data/few_shot_ch_stack/KD_focus'):
-        x = np.load(os.path.join('gridding/data/few_shot_ch_stack/KD_focus', task, 'x.npy'))
-        print(x.shape)
+    pass

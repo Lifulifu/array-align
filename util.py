@@ -5,10 +5,12 @@ import json
 import cv2
 from shapely.geometry import Polygon
 import os
+from tqdm import tqdm
 
 import torch
 from torch.utils.data.dataset import Dataset
 from torch.utils.data import DataLoader
+
 
 
 class Gal():
@@ -167,19 +169,21 @@ def im_contain_resize(im, size):
     return result, scale
 
 
-def get_window_coords(gal, b, expand=None, size=None, pixel_size=10):
+def get_window_coords(gal, b, expand=1, size=None, pixel_size=10):
+    '''
+    x, y is the top left corner of a block
+    '''
     block_info = gal.header[f'Block{b}']
-    cx, cy = block_info[Gal.CENTER_X], block_info[Gal.CENTER_Y]
-    if expand:
-        w = block_info[Gal.COL_MARGIN] * (block_info[Gal.N_COLS]-1) * expand
-        h = block_info[Gal.ROW_MARGIN] * (block_info[Gal.N_ROWS]-1) * expand
-    else:
-        w, h = size
-    x1 = int((cx - w/2) / pixel_size)
-    y1 = int((cy - h/2) / pixel_size)
-    x2 = int((cx + w/2) / pixel_size)
-    y2 = int((cy + h/2) / pixel_size)
-    return (x1, y1), (x2, y2)
+    x, y = block_info[Gal.CENTER_X]/pixel_size, block_info[Gal.CENTER_Y]/pixel_size
+    bw = block_info[Gal.COL_MARGIN] * (block_info[Gal.N_COLS]-1) / pixel_size
+    bh = block_info[Gal.ROW_MARGIN] * (block_info[Gal.N_ROWS]-1) / pixel_size
+
+    x1 = x - expand * bw * .5
+    y1 = y - expand * bh * .5
+    x2 = x1 + expand * bw
+    y2 = y1 + expand * bh
+
+    return (int(x1), int(y1)), (int(x2), int(y2))
 
 
 def crop_window(im, p1, p2, pad_val=0):
@@ -248,7 +252,7 @@ def write_dict(d, path):
         f.write(json.dumps(d))
 
 
-def eval_gridding(gpr, pred, gal=None, mode='spot', tolerance=.5,
+def eval_gridding(gpr, pred, gal=None, mode='spot', tolerance=.5, find_neighbors=False,
         gpr_coords=['X', 'Y'], pred_coords=['x', 'y'], pixel_size=10):
     '''
     assume coord information of 1 image (chip)
@@ -272,10 +276,11 @@ def eval_gridding(gpr, pred, gal=None, mode='spot', tolerance=.5,
     gt, pred = df[gpr_coords].values // pixel_size, df[pred_coords].values
     dist = np.abs(gt - pred)
     hits = (dist[:, 0] <= col_thres) & (dist[:, 1] <= row_thres)
+
     return dist, hits
 
 
-def eval_gridding2(gpr, pred, gal=None, mode='spot', tolerance=.5,
+def eval_gridding2(gpr, pred, gal=None, mode='spot', tolerance=.5, find_match=False,
         gpr_coords=['X', 'Y'], pred_coords=['x', 'y'], pixel_size=10):
     '''
     assume coord information of 1 image (chip)
@@ -300,6 +305,17 @@ def eval_gridding2(gpr, pred, gal=None, mode='spot', tolerance=.5,
     gt, pred = df[gpr_coords].values // pixel_size, df[pred_coords].values
     dist = np.abs(gt - pred)
     hits = (dist[:, 0] <= col_thres) & (dist[:, 1] <= row_thres)
+
+    if find_match:
+        print('matching false grid lines...')
+        hits_ = pd.DataFrame(hits, index=df.index)
+        for idx, row in tqdm(df[~hits].iterrows(), total=len(df[~hits])):
+            d = np.abs(df[gpr_coords].values // pixel_size - row[pred_coords].values)  # the x, y distance of every gridline to the error spot
+            h = (d[:, 0] <= col_thres) & (d[:, 1] <= row_thres)
+            if h.sum() > 0:  # correctly gridded if any gridline is a hit
+                hits_.loc[idx] = True
+        hits = hits_.values.flatten()
+
     return dist, hits
 
 
@@ -341,7 +357,7 @@ def read_csv(csv, table=True):
     return data
 
 
-def read_dir_files(dirs, gal_path:str, exclude=[]):
+def read_dir_files(dirs, gal_path:str='', exclude=[]):
     results = []
     for d in dirs:
         for f in os.listdir(d):

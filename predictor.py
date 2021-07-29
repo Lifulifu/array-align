@@ -11,7 +11,9 @@ class BlockCornerCoordPredictor():
     def __init__(self, model, dataset:ArrayBlockDataset, device='cuda:0'):
         self.dataset = dataset
         self.device = device
-        self.model = model
+        if isinstance(model, str):
+            model = torch.load(model)
+        self.model = model.to(device)
         self.model.eval()
         self.max_steps = 10
 
@@ -68,7 +70,7 @@ class BlockCornerCoordPredictor():
         idxs = pd.MultiIndex.from_tuples(idxs).set_names(['img_path', 'Block', 'Channel', 'Column', 'Row'])
         return pd.DataFrame(coords, index=idxs, columns=['x', 'y'])
 
-    def finetune_coords(self, spot_coord_df, gal, img_path, finetune, **finetune_args):
+    def finetune_coords(self, spot_coord_df, gal, img_path, finetune='all', **finetune_args):
         img = read_tif(img_path, channel_mode=self.dataset.channel_mode)
         for b, df in spot_coord_df.groupby(['Block']):
             p1, p2 = get_window_coords(
@@ -84,7 +86,7 @@ class BlockCornerCoordPredictor():
             spot_coord_df.loc[df.index, ['x', 'y']] = coords + p1
         return spot_coord_df
 
-    def finetune_block(self, img, spot_coords, mask_type='gaussian', mask_radius=5, stride=1):
+    def finetune_block(self, img, spot_coords, mask_type='circle', mask_radius=5, stride=1):
         if mask_type == 'gaussian':
             mask = self.make_gaussian_masks(img.shape[-2:], spot_coords, mask_radius)
         elif mask_type == 'circle':
@@ -110,7 +112,7 @@ class BlockCornerCoordPredictor():
         print(f'{step} steps used')
         return spot_coords
 
-    def finetune_spot(self, img, spot_coords, mask_type='gaussian', mask_radius=5, stride=1):
+    def finetune_spot(self, img, spot_coords, mask_type='circle', mask_radius=5, stride=1):
         directions = np.array([[0, -stride], [0, stride],
                             [-stride, 0], [stride, 0]])
         for i, coord in enumerate(spot_coords):
@@ -132,15 +134,8 @@ class BlockCornerCoordPredictor():
                     highest = scores[max_idx]
                     mask = self.shift_img(mask, directions[max_idx])
                     spot_coords[i] += directions[max_idx]
-                    #!
-                    mask = mask * (255/mask.max())
-                    im_ = np.concatenate([*img, mask], axis=0)
-                    cv2.imwrite(f'exps/test/{step}.png', im_)
-                    #!
                 else:
                     break
-            exit()
-            print(f'spot {i}: {step} steps used')
         return spot_coords
 
     def make_gaussian_masks(self, img_shape, means, sigma):

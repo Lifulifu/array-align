@@ -16,12 +16,12 @@ def to_color(grayscale, channel, alpha=False):  # {{{
         rgb(array): three dimension image and only red channel or green channel
     """
     if alpha:
-        rgb = np.zeros((*grayscale.shape, 4)).astype(np.uint8)
+        rgb = np.zeros((*grayscale.shape, 4))
         rgb[:, :, 3] = 255
     else:
-        rgb = np.zeros((*grayscale.shape, 3)).astype(np.uint8)
+        rgb = np.zeros((*grayscale.shape, 3))
     rgb[:, :, channel] = grayscale
-    return rgb
+    return rgb.astype(np.uint8).copy()  # opencv issue, need copy in order to modify
 
 def x2rgbimg(x, eq=False):
     '''
@@ -36,7 +36,7 @@ def x2rgbimg(x, eq=False):
             (len(x.shape) == 3) and (x.shape[0] == 1)):
         if x.shape[0] == 1: x = x[0]
         if eq: x = im_equalize(x, method=eq)
-        return cv2.cvtColor(x, cv2.COLOR_GRAY2RGB)
+        return cv2.cvtColor(x, cv2.COLOR_GRAY2BGR).astype(np.uint8)
 
     # (c, h, w)
     if eq:
@@ -44,8 +44,8 @@ def x2rgbimg(x, eq=False):
     if x.shape[0] < 3:
         assert x.shape[0] == 2
         blank = np.zeros((1, x.shape[1], x.shape[2]))
-        x = np.concatenate([x, blank]).astype(np.uint8)  # add blank 3rd channel
-    return cv2.cvtColor(np.moveaxis(x, 0, -1), cv2.COLOR_BGR2RGB)
+        x = np.concatenate([x, blank])  # add blank 3rd channel
+    return np.moveaxis(x, 0, -1).astype(np.uint8).copy()  # opencv issue, need copy in order to modify
 
 
 def write_corners_xybs(xb, yb, ypredb, output_dir, n_samples=False, eq=False, batch_no=0):
@@ -66,6 +66,7 @@ def draw_parallelogram(im, pts, label=True, label_offset=5, color=255, thickness
     '''
     pts: 3 points: (3, 2)
     '''
+    im = im.copy()
     if pts.shape[0] < 4:
         p4 = np.expand_dims(pts[0] + (pts[2] - pts[1]), axis=0) # the top right point
         pts = np.concatenate([pts, p4], axis=0)
@@ -77,6 +78,7 @@ def draw_parallelogram(im, pts, label=True, label_offset=5, color=255, thickness
     return im
 
 def draw_gal_centers(im, gal, color=255):
+    im = im.copy()
     for k in gal.header:
         if re.search('Block\d+', k) is None:
             continue
@@ -85,6 +87,7 @@ def draw_gal_centers(im, gal, color=255):
     return im
 
 def draw_windows(im, gal, color=255, **window_args):
+    im = im.copy()
     for b in range(1, gal.header['BlockCount']+1):
         p1, p2 = get_window_coords(gal, b, **window_args)
         im = cv2.rectangle(im, p1, p2, color, 2)
@@ -94,6 +97,7 @@ def draw_corners_gpr(im, gal, gpr, color=255):
     '''
     Draw all blocks in a tif
     '''
+    im = im.copy()
     for b in range(1, gal.header['BlockCount']+1):
         n_rows = gal.header[f'Block{b}'][Gal.N_ROWS]
         n_cols = gal.header[f'Block{b}'][Gal.N_COLS]
@@ -106,12 +110,14 @@ def draw_corners_gpr(im, gal, gpr, color=255):
     return im
 
 def draw_corners_df(im, block_coords, color=255):
+    im = im.copy()
     for b, row in block_coords.groupby('Block'):
         pts = row.values.reshape(3, 2)
         im = draw_parallelogram(im, pts, color=color, thickness=2)
     return im
 
 def draw_spots(im, spot_coords, color=255):
+    im = im.copy()
     for spot_coord in spot_coords:
         im = cv2.circle(im, (int(round(spot_coord[0])), int(round(spot_coord[1]))),
             5, color=color, thickness=1)
@@ -165,6 +171,7 @@ def draw_cohort_df_coords(cohort_df, coord_cols:List[list], colors:List[tuple]=[
                 cv2.imwrite(os.path.join(save_dir, path.rsplit('/', 1)[-1] + f'_{channel}_eq.png'), im)
             else:
                 cv2.imwrite(os.path.join(save_dir, path.rsplit('/', 1)[-1] + f'_{channel}.png'), im)
+
 
 
 

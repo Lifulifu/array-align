@@ -87,7 +87,7 @@ class Reptile():
         xtr, xte, ytr, yte = torch.tensor(xtr).float().to(self.device), torch.tensor(xte).float().to(
             self.device), torch.tensor(ytr).float().to(self.device), torch.tensor(yte).float().to(self.device)
         # optimizer = torch.optim.SGD(new_model.parameters(), lr=self.task_lr)
-        optimizer = torch.optim.Adam(new_model.parameters(), lr=self.task_lr)
+        optimizer = torch.optim.AdamW(new_model.parameters(), lr=self.task_lr)
         loss_func = nn.SmoothL1Loss(reduction='mean')
 
         # train

@@ -10,7 +10,7 @@ import math
 from gridding.util import *
 from gridding.dataset import *
 
-from .dehaze.dehaze import dehaze
+from .enhance.enhance import dong
 
 
 def get_local_gridding_imgs(img_path, gal: Gal, gpr: Gpr, pixel_size=10):
@@ -19,7 +19,7 @@ def get_local_gridding_imgs(img_path, gal: Gal, gpr: Gpr, pixel_size=10):
     y_padding = gal.header['Block1'][Gal.ROW_MARGIN] // pixel_size
     idxs, result, window_coords = [], [], []
     for b in range(1, gal.header['BlockCount']+1):
-        idxs.append([img_path, b])
+        idxs.append(b)
         coord_df = gpr.data.loc[b][['X', 'Y']] // pixel_size
         p1 = [int(coord_df['X'].values.min() - x_padding),
               int(coord_df['Y'].values.min() - y_padding)]
@@ -111,7 +111,7 @@ def im_sharpen(im, kernel_size=3, rate=.1):
     result = im + high pass * rate
     '''
     lowpass = ndimage.gaussian_filter(im, kernel_size)
-    return np.clip(im + (im - lowpass), 0, 255)
+    return np.clip(im + (im - lowpass)*rate, 0, 255)
 
 
 def get_peaks(hist):
@@ -138,6 +138,8 @@ def refine_peaks(peaks, sp_tolerance=.2):
     '''
     rough implementation of Joseph's alg
     '''
+    if len(peaks) <= 0:
+        return []
     spacings = [peaks[i+1] - peaks[i] for i in range(len(peaks)-1)]
     med_sp = np.median(spacings)
     min_sp = med_sp - med_sp * sp_tolerance
@@ -185,49 +187,57 @@ def rotate_coords(coords, angle, origin):
     return np.squeeze((R @ (p.T-o.T) + o.T).T)
 
 
-def joseph_predict_pipeline(img_path, gal: Gal, gpr: Gpr,
-                            pixel_size=10, kernel_size=(5, 5), max_tilt=30):
+def joseph_predict_pipeline(img_path, gal: Gal, gpr: Gpr, write_imgs=True, output_dir='./',
+                            pixel_size=10, kernel_size=5, max_tilt=30, sharpen_rate=.5):
     '''
     all, cut=.5: 0.63
     no eq, cut=.5: .37
-    img max merge: 
     '''
 
+    os.makedirs(output_dir, exist_ok=True)
     idxs, imgs, window_coords = get_local_gridding_imgs(img_path, gal, gpr, pixel_size)
+    # idxs, imgs, window_coords = idxs[:5], imgs[:5], window_coords[:5]
     result_idxs, spots = [], []
-    for idx, img, window_coord in tqdm(zip(idxs, imgs, window_coords), total=len(idxs)):
+    for b, img, window_coord in tqdm(zip(idxs, imgs, window_coords), total=len(idxs)):
         # median filtering
-        img = median_filter_3D(img, kernel_size)
-        # img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        img = img.astype(np.uint8)
+        img = np.stack([cv2.medianBlur(im, kernel_size) for im in img])  # (c, h, w)
+
+        # enhance
+        img = dong(x2rgbimg(img))  # (h, w, c)
+        img = img.mean(axis=-1) # (h, w)
+        # img = cv2.medianBlur(img, kernel_size)
 
         # top hat filtering
-        kernel = np.ones(kernel_size, np.uint8)
-        img = cv2.morphologyEx(img, cv2.MORPH_TOPHAT, kernel)
+        # kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        # img = cv2.morphologyEx(img, cv2.MORPH_TOPHAT, kernel)
 
         # eq
-        img = im_equalize(img, 'clahe')
+        # img = im_equalize(img, 'clahe')
 
         # tilt correction
         angle, _ = get_tilt_angle(img, max_tilt)
         img = im_rotate(img, -angle)
 
         # sharpen
-        img = im_sharpen(img, kernel_size[0], rate=.2)
+        img = im_sharpen(img, kernel_size, rate=sharpen_rate)
 
         # refine projections
         x_hist, y_hist = img.mean(axis=0), img.mean(axis=1)
-        # x_hist = np.clip(x_hist, 0, x_hist.min() + (x_hist.max()-x_hist.min()) * .5)
-        # y_hist = np.clip(y_hist, 0, y_hist.min() + (y_hist.max()-y_hist.min()) * .5)
+        # x_hist = np.clip(x_hist, 0, (x_hist.mean()+x_hist.max())/2)
+        # y_hist = np.clip(y_hist, 0, (y_hist.mean()+y_hist.max())/2)
+
         x_peaks = get_peaks(x_hist)
         y_peaks = get_peaks(y_hist)
         x_refined = refine_peaks(x_peaks)
         y_refined = refine_peaks(y_peaks)
 
-        img = draw_gridlines(img, x_refined, y_refined, x_color=(255,0,0), y_color=(255,0,0))
-        img = draw_gridlines(img, x_peaks, y_peaks)
-        cv2.imwrite(f'gridding/imgs/test/rep_test/{idx[1]}.png', img)
+        if write_imgs:
+            img = draw_gridlines(img, x_refined, y_refined, x_color=(255,0,0), y_color=(255,0,0))
+            img = draw_gridlines(img, x_peaks, y_peaks)
+            img_name = img_path.split('/')[-1].replace('.tif', '')
+            cv2.imwrite(os.path.join(output_dir, f'{img_name}_{idx[1]}.png'), img)
 
-        im_path, b = idx
         n_cols = gal.header[f'Block{b}'][Gal.N_COLS]
         n_rows = gal.header[f'Block{b}'][Gal.N_ROWS]
         block_spots = []

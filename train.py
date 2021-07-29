@@ -73,7 +73,7 @@ def train_block_corner_coord_model(model, xtr, ytr, xva, yva, epochs=100, start_
     model.to(device)
     loss_func = nn.SmoothL1Loss(reduction='mean')
     # optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     steps = len(xtr) / batch_size
     scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=lr[0], max_lr=lr[1],
         cycle_momentum=False, step_size_up=steps*4, step_size_down=steps*4)
@@ -116,7 +116,7 @@ def train_block_corner_coord_model(model, xtr, ytr, xva, yva, epochs=100, start_
                     os.makedirs(path, exist_ok=True)
                     write_corners_xybs(
                         xb.cpu().numpy(), yb.cpu().numpy(), ypredb.cpu().numpy(),
-                        output_dir=path, batch_no=batch, n_samples=5)
+                        output_dir=path, batch_no=batch, n_samples=5, eq='clahe')
 
         # ---------validation---------
         model.eval()
@@ -138,7 +138,7 @@ def train_block_corner_coord_model(model, xtr, ytr, xva, yva, epochs=100, start_
                 os.makedirs(path, exist_ok=True)
                 write_corners_xybs(
                     xb.cpu().numpy(), yb.cpu().numpy(), ypredb.cpu().numpy(),
-                    output_dir=path, batch_no=batch, n_samples=5)
+                    output_dir=path, batch_no=batch, n_samples=5, eq='clahe')
                 torch.save(model, os.path.join(output_dir, f'models/{epoch}.pt'))
 
         tr_loss_mean = np.array(tr_losses).mean()
