@@ -253,3 +253,167 @@ def train_spot_coord_model(data_dirs, gal_dirs, va_size=.2, te_size=.2, down_sam
         for ims, gals, gprs in trdl_bar:
             xb, yb, _ = dataset.imgs2xy(ims, gals, gprs, augment=True)
             draw_xy_spot_coord(xb, yb); exit()
+
+
+def train_gridding_pipeline(datas, dataset, output_dir, model:str,
+                            pretrained=True, start_epoch=1, epochs=2000, batch_size=64, save_interval=500, patience=0,
+                            max_imgs=20, max_ori=0, augment=0, max_samples=0, lr=(0.001, 0.01), use_gal=True, device='cuda:0'):
+    '''
+        datas: list of csvs that record (img, gal, gpr) file paths
+        max_imgs, max_ori, max_xs: max amount of imgs, real samples, total samples
+    '''
+    os.makedirs(output_dir, exist_ok=True)
+    if model is None:
+        if dataset.channel_mode == 'stack':
+            model = Resnet(channels=2, pretrained=pretrained)
+        else:
+            model = Resnet(channels=1, pretrained=pretrained)
+    else:
+        model = torch.load(model)
+
+    xtrs, xvas, ytrs, yvas = [], [], [], []
+    for path in datas:
+        files = read_csv(path)
+        if not use_gal:
+            for f in files:
+                f[1] = ''
+        if max_imgs > 0 and max_imgs < len(files):
+            files = np.array(files)[np.random.choice(
+                range(len(files)), max_imgs, replace=False)]
+
+        xs, ys, isori = dataset.imgs2xy(
+            files, augment=augment, keep_ori=True)
+        xs, xaugs, ys, yaugs = xs[isori], xs[~isori], ys[isori], ys[~isori]
+        print(xs.shape, ys.shape)
+
+        xtr, xva, ytr, yva = data_split(
+            xs, ys, .8, output_dir=output_dir, shuffle=False)
+        xaugtr, xaugva, yaugtr, yaugva = data_split(
+            xaugs, yaugs, .8, output_dir=output_dir, shuffle=False)
+        if max_ori > 0 and len(xtr) > max_ori:
+            idxs = np.random.choice(range(len(xtr)), size=max_ori, replace=False)
+            xtr, ytr = xtr[idxs], ytr[idxs]
+            aug_idxs = np.concatenate([np.arange(i, i+augment) for i in idxs])
+            xaugtr, yaugtr = xaugtr[aug_idxs], yaugtr[aug_idxs]
+
+        if max_samples > 0 and len(xtr) + len(xaugtr) > max_samples:
+            aug_amount = max_samples - len(xtr)
+            xaugtr, yaugtr = xaugtr[:aug_amount], yaugtr[:aug_amount]
+        xtr, ytr = np.concatenate((xtr, xaugtr)), np.concatenate((ytr, yaugtr))
+        xtrs.append(xtr)
+        xvas.append(xva)
+        ytrs.append(ytr)
+        yvas.append(yva)
+
+    xtrs = np.concatenate(xtrs)
+    xvas = np.concatenate(xvas)
+    ytrs = np.concatenate(ytrs)
+    yvas = np.concatenate(yvas)
+    print(xtrs.shape, ytrs.shape, xvas.shape, yvas.shape)
+
+    train_block_corner_coord_model(model, xtrs, ytrs, xvas, yvas,
+                                   epochs=epochs,
+                                   start_epoch=start_epoch,
+                                   lr=lr,
+                                   batch_size=batch_size,
+                                   output_dir=output_dir,
+                                   device=device,
+                                   save_interval=save_interval,
+                                   patience=patience)
+
+
+def pred_eval_gridding(data, output_dir, dataset, model, strict=True, write_img=False,
+        find_match=False, finetune=False, device='cuda:0'):
+    '''
+    data (str): the csv path contains all (img, gal, gpr) data's paths
+    '''
+
+    os.makedirs(output_dir, exist_ok=True)
+    files = read_csv(data)
+    predictor = BlockCornerCoordPredictor(model, dataset, device=device)
+
+    dists, hits = [], []
+    for im, gal, gpr in files:
+        print(im)
+        gpr = Gpr(gpr)
+        gal = Gal(gal) if gal != '' else make_fake_gal(gpr)
+
+        df, spot_df = predictor.predict(im, gal, finetune=finetune)
+        if df is None:
+            print('prediction failed')
+            continue
+
+        # take results of the first channel
+        df = df.groupby(['img_path', 'Block']).first()
+        spot_df = spot_df.groupby(
+            ['img_path', 'Block', 'Row', 'Column']).first()
+
+        if strict:
+            dist, hit = eval_gridding2(gpr, spot_df, find_match=find_match)
+        else:
+            dist, hit = eval_gridding(gpr, spot_df, find_match=find_match)
+        dists.append(dist)
+        hits.append(hit)
+
+        if write_img is not False:
+            im_name = im.replace('.tif', '').split('/')[-1]
+            for channel, im in enumerate(read_tif(im, rgb=True, eq_method='clahe')):
+                if write_img == 'block':
+                    im = draw_corners_gpr(im, gal, gpr, color=(0, 255, 0))
+                    im = draw_corners_df(im, df, color=(255, 0, 0))
+                else:
+                    im = draw_spots(
+                        im, gpr.data[['X', 'Y']].values/dataset.pixel_size, color=(0, 255, 0))
+                    im = draw_spots(
+                        im, spot_df[['x', 'y']].values, color=(255, 0, 0))
+                os.makedirs(output_dir, exist_ok=True)
+                if not cv2.imwrite(
+                        os.path.join(output_dir, f'{im_name}_{channel}.png'), im):
+                    print('imwrite failed again OMFG')
+
+    dist = np.concatenate(dists)
+    hit = np.concatenate(hits)
+    mae = dist.mean()
+    acc = hit.sum() / len(hit)
+    return acc, mae
+
+
+def fewshot_train_reptile_pipeline(datasets, output_dir, model=None, **args):
+    tasks = []
+    tr_files = os.path.join(output_dir, 'tr.csv')
+    va_files = os.path.join(output_dir, 'va.csv')
+    if os.path.isfile(tr_files) and os.path.isfile(va_files):
+        tr_tasks = read_csv(tr_files, table=False)
+        va_tasks = read_csv(va_files, table=False)
+    else:
+        for ds in datasets:
+            for task in os.listdir(datasets[ds]):
+                tasks.append(os.path.join(datasets[ds], task))
+        tr_tasks, va_tasks = train_test_split(
+            tasks, test_size=.2, shuffle=True)
+        write_file(tr_tasks, os.path.join(output_dir, 'tr.csv'))
+        write_file(va_tasks, os.path.join(output_dir, 'va.csv'))
+    reptile = Reptile(model, tr_tasks, va_tasks, output_dir=output_dir, **args)
+    reptile.meta_train()
+
+
+def fewshot_train_MAML_pipeline(datasets, output_dir, model, **args):
+    tasks = []
+    tr_files = os.path.join(output_dir, 'tr.csv')
+    va_files = os.path.join(output_dir, 'va.csv')
+    if os.path.isfile(tr_files) and os.path.isfile(va_files):
+        tr_tasks = read_csv(tr_files, table=False)
+        va_tasks = read_csv(va_files, table=False)
+    else:
+        for ds in datasets:
+            for task in os.listdir(datasets[ds]):
+                tasks.append(os.path.join(datasets[ds], task))
+        tr_tasks, va_tasks = train_test_split(
+            tasks, test_size=.2, shuffle=True)
+        write_file(tr_tasks, os.path.join(output_dir, 'tr.csv'))
+        write_file(va_tasks, os.path.join(output_dir, 'va.csv'))
+    maml = MAML(model, tr_tasks, va_tasks, **args)
+    maml.meta_train(output_dir)
+
+
+
